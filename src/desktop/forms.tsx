@@ -241,6 +241,10 @@ function ResultPane({
             onJob(next);
             onMessage(t.result.stopped);
           }}
+          onResumed={(next) => {
+            onJob(next);
+            onMessage(t.result.resuming);
+          }}
           onError={(message) => onMessage(message, 'error')}
           onOpenWorkbench={onOpenWorkbench}
           onRated={onJob}
@@ -279,6 +283,7 @@ export const defaultFigureForm: FigureFormState = {
 };
 
 export function FigureForm({
+  simpleMode,
   state,
   onState,
   job,
@@ -289,6 +294,7 @@ export function FigureForm({
   t,
   d
 }: {
+  simpleMode: boolean;
   state: FigureFormState;
   onState: (next: (current: FigureFormState) => FigureFormState) => void;
   job: JobRecord | null;
@@ -337,6 +343,7 @@ export function FigureForm({
       onMessage(t.paper.submitted);
       const created = await createJob({
         mode: 'paper_figure',
+        simple_mode: simpleMode,
         payload: {
           figure_title: title,
           section_description: description,
@@ -502,6 +509,7 @@ export const defaultSlideForm: SlideFormState = {
 };
 
 export function SlideForm({
+  simpleMode,
   state,
   onState,
   job,
@@ -512,6 +520,7 @@ export function SlideForm({
   t,
   d
 }: {
+  simpleMode: boolean;
   state: SlideFormState;
   onState: (next: (current: SlideFormState) => SlideFormState) => void;
   job: JobRecord | null;
@@ -565,6 +574,7 @@ export function SlideForm({
       onMessage(t.ppt.submitted);
       const created = await createJob({
         mode: 'ppt_slide',
+        simple_mode: simpleMode,
         payload: {
           template_id: master.id,
           material_text: material,

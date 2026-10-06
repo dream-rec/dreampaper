@@ -40,6 +40,11 @@ if (info.platform === 'win32') {
   } finally {
     rmSync(temporary, { recursive: true, force: true });
   }
+} else if (info.platform === 'linux') {
+  // deb 由 Tauri 直接产出（资源、sidecar 与 ORT 都在包内），这里只做归集命名。
+  const deb = take(join(binary, 'bundle/deb'), (name) => name.endsWith('.deb'));
+  copyFileSync(deb, join(output, `dreampaper-${version}-${info.debian_arch}.deb`));
+  verifyRuntime(join(root, 'src-tauri/runtime', triple), triple);
 } else {
   if (process.env.APPLE_SIGNING_IDENTITY && process.env.APPLE_SIGNING_IDENTITY !== '-') throw new Error('当前打包流程仅支持 ad-hoc 签名');
   const source = take(join(binary, 'bundle/macos'), (name) => name.endsWith('.app'));

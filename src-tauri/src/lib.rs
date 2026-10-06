@@ -45,6 +45,7 @@ pub fn run() {
             cmd::get_job,
             cmd::list_jobs,
             cmd::cancel_job,
+            cmd::resume_job,
             cmd::delete_job,
             cmd::rate_job,
             cmd::delete_templates,

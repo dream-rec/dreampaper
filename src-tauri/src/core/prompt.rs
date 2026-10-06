@@ -19,8 +19,8 @@ const EMBEDDED_PROMPTS: &[(&str, &str)] = &[
         include_str!("../../../prompts/global/expression.md"),
     ),
     (
-        "global/visual_terms.json",
-        include_str!("../../../prompts/global/visual_terms.json"),
+        "global/visual_subjects.md",
+        include_str!("../../../prompts/global/visual_subjects.md"),
     ),
     (
         "modes/paper_figure/structure.md",

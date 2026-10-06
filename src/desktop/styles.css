@@ -5,7 +5,9 @@
   --card: #ffffff;
   --chip: #f4f4f7;
   --chip-strong: #eaeaef;
+  --inset: #f7f3fc;
   --hairline: rgba(22, 24, 32, 0.075);
+  --flow-active: rgba(180, 93, 242, 0.1);
 
   --ink: #16181f;
   --text-1: #1d2029;
@@ -20,6 +22,8 @@
 
   --amber: #f59e0b;
   --rose: #e5484d;
+  /* 简单模式标签用的绿色强调色：比 amber/rose 深一点，浅底上的小字才读得清。 */
+  --emerald: #0f8a4d;
 
   --r-card: 22px;
   --r-chip: 14px;
@@ -51,7 +55,9 @@
   --card: #212329;
   --chip: #282b32;
   --chip-strong: #31343c;
+  --inset: #2c2735;
   --hairline: rgba(255, 255, 255, 0.08);
+  --flow-active: rgba(199, 123, 245, 0.16);
 
   --ink: #f4f5f7;
   --text-1: #f4f5f7;
@@ -63,6 +69,7 @@
   --accent-soft: rgba(199, 123, 245, 0.18);
   --accent-ink: #ddb4fb;
   --accent-shadow: rgba(0, 0, 0, 0.36);
+  --emerald: #43cf84;
 
   --shadow-card:
     0 1px 2px rgba(0, 0, 0, 0.3),
@@ -362,20 +369,21 @@
   height: 48px;
 }
 
-/* Windows draws its own title bar, so the top padding that clears the macOS
-   traffic lights and the drag strip that replaces the missing title bar are
-   both dead weight there: they leave ~48px of empty space under real chrome.
-   The strip has to go along with the padding, otherwise it keeps covering the
-   top of the page and swallows clicks on the heading it now overlaps. */
-.is-windows .desktop-rail {
+/* Windows and Linux draw their own title bar, so the top padding that clears
+   the macOS traffic lights and the drag strip that replaces the missing title
+   bar are both dead weight there: they leave ~48px of empty space under real
+   chrome — the first thing the eye lands on. The strip has to go along with the
+   padding, otherwise it keeps covering the top of the page and swallows clicks
+   on the heading it now overlaps. */
+.is-native-chrome .desktop-rail {
   padding-top: 14px;
 }
 
-.is-windows .desktop-main {
-  padding-top: 20px;
+.is-native-chrome .desktop-main {
+  padding-top: 16px;
 }
 
-.is-windows .desktop-drag-strip {
+.is-native-chrome .desktop-drag-strip {
   display: none;
 }
 
@@ -405,9 +413,36 @@
 
 .desktop-page {
   display: grid;
+  grid-template-rows: minmax(0, 1fr);
   min-width: 0;
   min-height: 0;
+  overflow: hidden;
+}
+
+/* Inactive pages stay in the tree (see `visited`) but must not paint or take
+   hits. The active pane is the definite grid track workbench and the task
+   pages fill. */
+.desktop-pane {
+  display: none;
+  grid-area: 1 / 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+.desktop-pane.is-active {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
   overflow-y: auto;
+}
+
+.desktop-pane.clips.is-active {
+  overflow: hidden;
+}
+
+/* Only browsers that actually run the transition get the name, and only on the
+   visible pane. On a scroller it forces a snapshot root, so WebKit repaints
+   every scroll frame on the main thread. */
+.desktop-pane.has-view-transition {
   view-transition-name: main-content;
 }
 
@@ -439,15 +474,7 @@
   }
 }
 
-.desktop-page.page-enter {
-  animation: dp-page-in 240ms cubic-bezier(0.32, 0.72, 0, 1);
-}
-
 @media (prefers-reduced-motion: reduce) {
-  .desktop-page.page-enter {
-    animation: none;
-  }
-
   .dp-lib-skeleton {
     animation: none;
     opacity: 0.7;
@@ -1562,6 +1589,15 @@
   background: rgba(229, 72, 77, 0.2);
 }
 
+.desktop-shell .resume-job-button {
+  min-height: 24px;
+  padding: 0 12px;
+  border-radius: var(--r-pill);
+  box-shadow: none;
+  font-size: 11.5px;
+  font-weight: 620;
+}
+
 .desktop-shell .progress-track {
   height: 6px;
   border-radius: var(--r-pill);
@@ -1640,81 +1676,133 @@
   font-size: 11px;
 }
 
-.desktop-shell .design-log-toggle {
-  padding: 8px 11px;
-  border-radius: var(--r-inner);
-  background: var(--card);
-  box-shadow: none;
+.desktop-shell .flow-log {
+  padding: 0;
+  margin: 0 0 16px;
+  border: 0;
+  background: transparent;
+}
+
+.desktop-shell .flow-stage {
+  padding: 14px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-chip);
+  background: var(--chip);
+}
+
+.desktop-shell .flow-empty {
   color: var(--text-2);
-  font-size: 11.5px;
-  font-weight: 640;
-  letter-spacing: 0.04em;
-}
-
-.desktop-shell .design-log-toggle:hover {
-  background: var(--chip-strong);
-}
-
-.desktop-shell .design-log-caret {
-  border-left-color: var(--text-3);
-}
-
-.desktop-shell .design-log-count {
-  background: var(--accent-soft);
-  color: var(--accent-ink);
   font-size: 11px;
 }
 
-.desktop-shell .design-log-item {
-  padding: 10px 12px;
-  border-radius: var(--r-inner);
-  border-left: 3px solid var(--hairline);
-  background: var(--card);
-  box-shadow: none;
-}
-
-.desktop-shell .design-log-item.active {
-  border-left-color: var(--accent);
-  background: var(--accent-soft);
-}
-
-.desktop-shell .design-log-item.failed {
-  border-left-color: var(--rose);
-  background: rgba(229, 72, 77, 0.08);
-}
-
-.desktop-shell .design-log-dot {
-  background: var(--text-3);
-}
-
-.desktop-shell .design-log-item.active .design-log-dot {
-  background: var(--accent);
-}
-
-.desktop-shell .design-log-item.failed .design-log-dot {
-  background: var(--rose);
-}
-
-.desktop-shell .design-log-label {
+.desktop-shell .flow-log-head h3 {
   color: var(--text-1);
   font-size: 12px;
 }
 
-.desktop-shell .design-log-step {
-  color: var(--text-3);
+.desktop-shell .flow-log-count {
+  background: var(--card);
+  color: var(--accent-ink);
   font-size: 10.5px;
 }
 
-.desktop-shell .design-log-badge {
+.desktop-shell .flow-log-hint {
+  color: var(--text-3);
+  font-size: 11px;
+}
+
+.desktop-shell .flow-item {
+  border: 1px solid var(--hairline);
+  border-left: 3px solid var(--chip-strong);
+  background: var(--card);
+  box-shadow: none;
+}
+
+.desktop-shell .flow-item.active {
+  border-left-color: var(--accent);
+  background: var(--flow-active);
+}
+
+.desktop-shell .flow-item.failed {
+  border-left-color: var(--rose);
+  background: rgba(229, 72, 77, 0.08);
+}
+
+.desktop-shell .flow-item.prompt {
+  border-left-color: var(--accent);
+  background: var(--flow-active);
+}
+
+/* 卡片被状态色染色时，内容块改用卡片底色，否则两者会糊在一起。 */
+.desktop-shell .flow-item.active .flow-text,
+.desktop-shell .flow-item.failed .flow-text,
+.desktop-shell .flow-item.prompt .flow-text {
+  background: var(--card);
+}
+
+.desktop-shell .flow-toggle {
+  color: var(--text-1);
+  font-size: 12px;
+}
+
+.desktop-shell .flow-caret {
+  border-left-color: var(--text-3);
+}
+
+.desktop-shell .flow-dot {
+  background: var(--text-3);
+}
+
+.desktop-shell .flow-item.active .flow-dot {
+  background: var(--accent);
+}
+
+.desktop-shell .flow-item.failed .flow-dot {
+  background: var(--rose);
+}
+
+.desktop-shell .flow-badge {
   background: var(--accent-soft);
   color: var(--accent-ink);
   font-size: 10px;
 }
 
-.desktop-shell .design-log-body {
+.desktop-shell .flow-copy {
+  background: var(--card);
+  box-shadow: none;
+  color: var(--accent-ink);
+  font-size: 10.5px;
+}
+
+.desktop-shell .flow-block-label {
+  color: var(--text-3);
+  font-size: 10.5px;
+}
+
+.desktop-shell .flow-text {
   max-height: 220px;
+  background: var(--inset);
   color: var(--text-2);
   font-size: 11.5px;
+}
+
+.desktop-shell .simple-switch {
+  flex: none;
+  margin-top: 2px;
+  padding: 0 11px 0 9px;
+  background: var(--card);
+  box-shadow: none;
+  color: var(--text-2);
+  font-size: 11.5px;
+  letter-spacing: 0.02em;
+}
+
+.desktop-shell .simple-switch-track {
+  background: var(--chip-strong);
+}
+
+.desktop-shell .simple-switch input:checked + .simple-switch-track {
+  background: var(--accent);
 }
 
 .desktop-shell .error-diagnostic {
@@ -1976,15 +2064,17 @@
 }
 
 .desktop-shell .history-panel {
-  display: grid;
+  display: flex;
+  flex-direction: column;
+  /* Fill the pane and scroll the card list inside. The page used to scroll
+     this panel, shadow included, so the blurred edge was as tall as every
+     card and WebKit redrew that blur on each frame. */
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
   border: 1px solid var(--hairline);
   background: var(--card);
   box-shadow: var(--shadow-card);
-  /* The panel is stretched to the viewport by .desktop-page, so the default
-     align-content: stretch hands the slack to every auto row — the toolbar
-     grew or shrank with the number of matching cards. Pack to the top and the
-     toolbar keeps one height whatever the filter selects. */
-  align-content: start;
   gap: 14px;
   padding: 16px 18px;
 }
@@ -2064,7 +2154,11 @@
 
 .history-groups {
   display: grid;
+  align-content: start;
   gap: 16px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .history-group-title {
@@ -2107,23 +2201,13 @@
   gap: 0;
   min-width: 0;
   overflow: hidden;
-  /* Result images are full-resolution (5504x3072 is typical), so every card
-     the browser renders costs a ~68MB decode. Skipping offscreen cards keeps
-     that bounded to the rows actually on screen; `auto` lets the browser reuse
-     each card's real measured size once it has rendered one. */
-  content-visibility: auto;
-  contain-intrinsic-size: auto 300px;
   border: 1px solid color-mix(in srgb, var(--text-3) 14%, transparent);
   border-radius: 16px;
   background: var(--card);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
-  transition: border-color 150ms ease, box-shadow 150ms ease, transform 150ms ease;
 }
 
 .history-card:hover {
   border-color: color-mix(in srgb, var(--accent) 35%, transparent);
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.12);
-  transform: translateY(-2px);
 }
 
 /* Filtering hides cards rather than unmounting them, so their images survive
@@ -2217,6 +2301,12 @@
 .hc-rating.hc-rating-poor {
   background: color-mix(in srgb, var(--rose) 14%, transparent);
   color: var(--rose);
+}
+
+/* 简单模式：绿色强调，和其它标签一样只是说明性的标记。 */
+.hc-simple {
+  background: color-mix(in srgb, var(--emerald) 16%, transparent);
+  color: var(--emerald);
 }
 
 .hc-title {

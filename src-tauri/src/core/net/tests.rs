@@ -387,3 +387,65 @@ async fn model_connection_timeout_is_not_capped_at_30_seconds() {
         assert!(task.await.unwrap().unwrap_err().is_timeout());
     }
 }
+
+#[test]
+fn only_an_explicit_non_blank_proxy_counts() {
+    assert_eq!(configured_proxy(None), None);
+    assert_eq!(configured_proxy(Some("")), None);
+    assert_eq!(configured_proxy(Some("   ")), None);
+    assert_eq!(
+        configured_proxy(Some(" http://127.0.0.1:7890 ")),
+        Some("http://127.0.0.1:7890")
+    );
+}
+
+#[tokio::test]
+async fn environment_proxies_are_ignored_without_an_explicit_setting() {
+    // 用户 shell 里常见的 *_PROXY 不能悄悄生效：只认设置里填的地址。
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("代理监听");
+    let proxy = format!("http://{}", listener.local_addr().expect("地址"));
+    let closed = TcpListener::bind("127.0.0.1:0").await.expect("目标监听");
+    let target = closed.local_addr().expect("地址");
+    drop(closed); // 目标端口已释放：直连立刻被拒，只有走代理才会连到上面那个监听端口。
+    let proxy_keys = [
+        "HTTP_PROXY",
+        "http_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    ];
+    for key in proxy_keys {
+        std::env::set_var(key, &proxy);
+    }
+    for key in ["NO_PROXY", "no_proxy"] {
+        std::env::remove_var(key);
+    }
+
+    let client = build_model_client(3, None).expect("客户端");
+    let _ = client.get(format!("http://{target}/")).send().await;
+
+    for key in proxy_keys {
+        std::env::remove_var(key);
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), listener.accept())
+            .await
+            .is_err(),
+        "环境里的代理不该被采用"
+    );
+}
+
+#[test]
+fn transport_suggestions_point_at_the_real_cause() {
+    // 超时不该引导用户去查代理或 DNS：grok_search 的往返天生要几十秒。
+    let grok = transport_suggestion("search", "grok_search", true, false);
+    assert!(grok.contains("120 秒"), "{grok}");
+    assert!(!grok.contains("DNS"), "{grok}");
+
+    let general = transport_suggestion("design", "openai_responses", true, false);
+    assert!(general.contains("超时"), "{general}");
+
+    assert!(transport_suggestion("search", "grok_search", false, true).contains("代理"));
+    assert!(transport_suggestion("search", "grok_search", false, false).contains("DNS"));
+}

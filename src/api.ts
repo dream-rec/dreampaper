@@ -2,6 +2,7 @@ import type {
   AppConfig,
   AssetUpload,
   DesignLogEvent,
+  JobCreateRequest,
   JobRating,
   JobRecord,
   ReleaseInfo,
@@ -108,7 +109,7 @@ export async function uploadAsset(file: File) {
   return request<AssetUpload>('/api/assets', { method: 'POST', body: data });
 }
 
-export function createJob(body: unknown) {
+export function createJob(body: JobCreateRequest) {
   if (isDesktop) return ipc<JobRecord>('create_job', { payload: body });
   return request<JobRecord>('/api/jobs', {
     method: 'POST',
@@ -148,6 +149,11 @@ export function listJobs(limit = 20, offset = 0) {
 
 export function cancelJob(id: string) {
   return ipc<JobRecord>('cancel_job', { id });
+}
+
+/** 继续一个失败或已停止的任务：同一条记录重跑，已完成的部分从缓存回放。 */
+export function resumeJob(id: string) {
+  return ipc<JobRecord>('resume_job', { id });
 }
 
 export function deleteJob(id: string) {

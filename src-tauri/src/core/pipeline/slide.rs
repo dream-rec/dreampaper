@@ -9,6 +9,7 @@ use crate::core::memory::{Fingerprint, MemoryCase};
 use crate::core::model::design::ImageInput;
 use crate::core::model::implement::ImplementClient;
 use crate::core::pipeline::advisor::{AdvisorHook, AdvisorRun};
+use crate::core::pipeline::cache::{cached_image, profile_identity, AnswerCache, StepCache};
 use crate::core::pipeline::contract;
 use crate::core::pipeline::figure::StageSink;
 use crate::core::pipeline::hook::{injected_summary, ContextHooks, Section, StaticContext};
@@ -18,11 +19,12 @@ use crate::core::pipeline::slide_validate::{
     validate_template_analysis,
 };
 use crate::core::pipeline::visual::{
-    build_visual_asset_context, visual_asset_context_text, VisualTerms,
+    build_visual_asset_context, pick_visual_subjects, visual_asset_context_text,
+    visual_asset_log_text,
 };
 use crate::core::prompt::{PromptAsset, PromptStore};
 use crate::error::{AppError, AppResult};
-use crate::event::DesignSink;
+use crate::event::{DesignLog, DesignSink};
 
 /// Stage keys the context hooks are registered against. Page planning shares
 /// one key across pages: the hooks contribute the same deck-level context to
@@ -33,7 +35,6 @@ pub const STAGE_PAGE: &str = "ppt_page_plan";
 
 const PPT_PLAN_TEMPLATE_LIMIT: usize = 2600;
 const PPT_PLAN_MATERIAL_LIMIT: usize = 3200;
-const PPT_PLAN_VISUAL_CONTEXT_LIMIT: usize = 1400;
 
 pub const MATERIAL_TEXT_LIMIT: usize = 6000;
 
@@ -310,6 +311,7 @@ struct PagePlanContext<'a> {
     deck_outline: &'a Value,
     proxy_url: Option<&'a str>,
     design_log: DesignSink<'a>,
+    cache: Option<&'a AnswerCache>,
 }
 
 impl PagePlanContext<'_> {
@@ -317,7 +319,7 @@ impl PagePlanContext<'_> {
         let page_number = page_brief["page"].as_i64().unwrap_or(0);
         stage(
             &format!("ppt_page_prompt_{page_number}"),
-            &format!("拼接第 {page_number} 页规划 prompt"),
+            &format!("准备第 {page_number} 页规划"),
         );
         let page_prompt = self
             .hooks
@@ -373,6 +375,10 @@ impl PagePlanContext<'_> {
                 step: &step_name,
                 label: &step_label,
             }),
+            cache: self.cache.map(|cache| StepCache {
+                cache,
+                scope: &step_name,
+            }),
         };
         let page_text = call.first().await?;
 
@@ -389,7 +395,7 @@ pub struct SlideRun<'a> {
     pub prompts: &'a PromptStore,
     pub config: &'a AppConfig,
     pub design_profile: &'a ModelProfile,
-    pub implement_profile: &'a ModelProfile,
+    pub implement_profile: Option<&'a ModelProfile>,
     pub search_profile: &'a ModelProfile,
     pub template_image: ImageInput,
     pub material_context: String,
@@ -397,12 +403,15 @@ pub struct SlideRun<'a> {
     /// Recalled cases for the advisor step; empty means the step is skipped.
     pub similar_cases: Vec<MemoryCase>,
     pub fingerprint: Option<Fingerprint>,
+    /// 失败或停止后重跑这个任务时的答案缓存；没有就每次都真的调用。
+    pub cache: Option<&'a AnswerCache>,
 }
 
 /// What a slide run hands back: one image per page and the deck-level design
 /// product (master analysis plus outline) the memory keeps as the case.
 pub struct SlideOutput {
     pub pages: Vec<String>,
+    pub final_prompts: Vec<String>,
     pub design: Value,
 }
 
@@ -427,17 +436,35 @@ impl SlideRun<'_> {
             ));
         }
 
-        stage("ppt_visual_assets", "检索产品/工具视觉素材线索");
-        let visual_terms = VisualTerms::from_store(self.prompts);
-        let visual_asset_context = build_visual_asset_context(
+        stage("ppt_visual_assets", "联网查询产品与工具的视觉素材");
+        // 检索只吃资料与附件：约束（字体、底色一类）不是可检索的视觉主体。
+        let subjects = pick_visual_subjects(
             &self.material_context,
-            &visual_terms,
-            self.search_profile,
+            self.design_profile,
+            self.prompts,
             proxy,
+            self.cache,
         )
         .await;
+        let visual_asset_context = build_visual_asset_context(
+            &subjects,
+            self.search_profile,
+            proxy,
+            self.design_log,
+            self.cache,
+        )
+        .await?;
         let visual_asset_prompt = visual_asset_context_text(&visual_asset_context);
-        let ppt_output = ppt_output_defaults(self.implement_profile);
+        (self.design_log)(DesignLog::End {
+            step: "ppt_visual_assets",
+            label: "联网查询 · 视觉证据",
+            text: &visual_asset_log_text(&visual_asset_context),
+            ok: true,
+        });
+        let ppt_output = self
+            .implement_profile
+            .map(ppt_output_defaults)
+            .unwrap_or_default();
 
         let mut hooks = ContextHooks::default();
         hooks.register(
@@ -460,7 +487,7 @@ impl SlideRun<'_> {
                 "search-evidence",
                 &[STAGE_OUTLINE, STAGE_PAGE],
                 "Visual Asset Search Context",
-                truncate_text(&visual_asset_prompt, PPT_PLAN_VISUAL_CONTEXT_LIMIT),
+                visual_asset_prompt,
             )
             .at(5),
         );
@@ -492,7 +519,6 @@ impl SlideRun<'_> {
             .compose(STAGE_ANALYZE, &analyzer_assets, Vec::new())
             .prompt;
         let template_images = vec![self.template_image.clone()];
-
         let analyzer_call = DesignCall {
             profile: self.design_profile,
             system_prompt: &analyzer_assets[0].content,
@@ -503,14 +529,18 @@ impl SlideRun<'_> {
             log: Some(DesignStep {
                 sink: self.design_log,
                 step: "ppt_analyze",
-                label: "分析 template",
+                label: "分析母版",
+            }),
+            cache: self.cache.map(|cache| StepCache {
+                cache,
+                scope: STAGE_ANALYZE,
             }),
         };
 
-        stage("ppt_analyze", "调用 design model 分析 template");
+        stage("ppt_analyze", "分析母版版式");
         let analysis_text = analyzer_call.first().await?;
 
-        stage("ppt_parse_template", "解析 template 分析结果");
+        stage("ppt_parse_template", "校验母版分析结果");
         let template_analysis =
             parse_validate_or_fill(&analyzer_call, &analysis_text, validate_template_analysis)
                 .await?
@@ -541,19 +571,20 @@ impl SlideRun<'_> {
         {
             stage(
                 "ppt_advisor",
-                &format!("advisor 比对 {} 个相似历史案例", self.similar_cases.len()),
+                &format!("对比 {} 个相似历史案例", self.similar_cases.len()),
             );
             let advisor = AdvisorRun {
                 prompts: self.prompts,
                 profile: self.design_profile,
                 proxy_url: proxy,
                 design_log: self.design_log,
+                cache: self.cache,
             };
             match advisor.advise(fingerprint, &self.similar_cases).await {
                 Some(advice) => {
                     hooks.register(AdvisorHook::new(&[STAGE_OUTLINE, STAGE_PAGE], advice))
                 }
-                None => stage("ppt_advisor", "advisor 未给出可用建议，按无历史案例继续"),
+                None => stage("ppt_advisor", "没有可用的历史建议，按新任务继续"),
             }
         }
 
@@ -573,7 +604,7 @@ impl SlideRun<'_> {
         stage(
             "ppt_outline_prompt",
             &format!(
-                "拼接整套大纲规划 prompt（注入 {}）",
+                "准备整套大纲规划（注入 {}）",
                 injected_summary(&outline_composed)
             ),
         );
@@ -592,12 +623,16 @@ impl SlideRun<'_> {
                 step: "ppt_outline",
                 label: "规划整套大纲",
             }),
+            cache: self.cache.map(|cache| StepCache {
+                cache,
+                scope: STAGE_OUTLINE,
+            }),
         };
 
-        stage("ppt_outline", "调用 design model 规划整套大纲");
+        stage("ppt_outline", "规划整套大纲");
         let outline_text = outline_call.first().await?;
 
-        stage("ppt_parse_outline", "解析并校验整套大纲");
+        stage("ppt_parse_outline", "校验整套大纲");
         let deck_outline = parse_validate_or_fill(&outline_call, &outline_text, |value| {
             validate_ppt_outline(value, page_count)
         })
@@ -608,10 +643,7 @@ impl SlideRun<'_> {
             .cloned()
             .unwrap_or_default();
 
-        stage(
-            "ppt_page_plan_queue",
-            &format!("按并发 {page_plan_concurrency} 排队规划 {page_count} 页"),
-        );
+        stage("ppt_page_plan_queue", &format!("排队规划 {page_count} 页"));
         let plan_context = PagePlanContext {
             profile: self.design_profile,
             system_prompt: &page_assets[0].content,
@@ -621,6 +653,7 @@ impl SlideRun<'_> {
             deck_outline: &deck_outline,
             proxy_url: proxy,
             design_log: self.design_log,
+            cache: self.cache,
         };
         let planned = run_ordered(
             page_briefs
@@ -631,23 +664,33 @@ impl SlideRun<'_> {
         )
         .await?;
 
-        stage("ppt_merge_pages", "合并并校验页面规划");
+        stage("ppt_merge_pages", "汇总页面规划");
         let pages_json = json!({ "pages": planned });
         let pages = validate_ppt_pages(&pages_json, page_count, Some(&template_analysis))?;
         let pages = apply_master_prompt_prefix(&pages, &template_analysis)?;
+        let final_prompts = pages
+            .iter()
+            .map(|page| {
+                page["implement_prompt"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string()
+            })
+            .collect();
 
-        stage(
-            "ppt_implement_queue",
-            &format!("按并发 {image_concurrency} 排队生成图片"),
-        );
-        let rendered = run_ordered(
-            pages
-                .iter()
-                .map(|page| self.implement_page(page, &ppt_output, proxy, stage))
-                .collect(),
-            image_concurrency,
-        )
-        .await?;
+        let rendered = if self.implement_profile.is_some() {
+            stage("ppt_implement_queue", &format!("排队生成图片"));
+            run_ordered(
+                pages
+                    .iter()
+                    .map(|page| self.implement_page(page, &ppt_output, proxy, stage))
+                    .collect(),
+                image_concurrency,
+            )
+            .await?
+        } else {
+            Vec::new()
+        };
         let page_plans: Vec<Value> = pages
             .iter()
             .map(|page| {
@@ -661,6 +704,7 @@ impl SlideRun<'_> {
             .collect();
         Ok(SlideOutput {
             pages: rendered,
+            final_prompts,
             design: json!({
                 "template_analysis": template_analysis,
                 "deck_outline": deck_outline,
@@ -678,14 +722,31 @@ impl SlideRun<'_> {
     ) -> AppResult<String> {
         let page_number = page["page"].as_i64().unwrap_or(0);
         let prompt = page["implement_prompt"].as_str().unwrap_or_default();
-        stage(
-            &format!("ppt_implement_{page_number}"),
-            &format!("生成第 {page_number} 页图片"),
-        );
-        ImplementClient::generate(self.implement_profile, prompt, &[], ppt_output, proxy).await
+        let step = format!("ppt_implement_{page_number}");
+        stage(&step, &format!("生成第 {page_number} 页图片"));
+        let profile = self
+            .implement_profile
+            .ok_or_else(|| AppError::new("missing_profile", "Missing implement profile"))?;
+        // 每页各自一份缓存：上次跑到第 6 页失败，重跑时前 5 页的图不再重新生成。
+        let identity = profile_identity(profile);
+        let overrides_json = serde_json::to_string(ppt_output).unwrap_or_default();
+        cached_image(
+            self.cache.map(|cache| StepCache {
+                cache,
+                scope: &step,
+            }),
+            &[
+                identity.as_bytes(),
+                prompt.as_bytes(),
+                overrides_json.as_bytes(),
+            ],
+            || ImplementClient::generate(profile, prompt, &[], ppt_output, proxy),
+        )
+        .await
     }
 }
 
+/// Custom constraints may name the only concrete subject; prioritize them before bounded material.
 #[cfg(test)]
 mod tests {
     use super::*;

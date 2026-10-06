@@ -196,7 +196,12 @@ mod tests {
             "User Input",
             "title: x",
         ));
-        hooks.register(StaticContext::new("evidence", &["outline"], "Evidence", "urls"));
+        hooks.register(StaticContext::new(
+            "evidence",
+            &["outline"],
+            "Evidence",
+            "urls",
+        ));
 
         let design = hooks.compose(
             "design",

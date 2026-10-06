@@ -27,7 +27,16 @@ from .adapters import (
 )
 from .assets import AssetStore
 from .config import ConfigStore, app_home
-from .models import JobCreateRequest, JobError, JobEvent, JobImage, JobRecord, PaperFigurePayload, PptSlidePayload
+from .models import (
+    JobCreateRequest,
+    JobError,
+    JobEvent,
+    JobImage,
+    JobRecord,
+    ModelProfile,
+    PaperFigurePayload,
+    PptSlidePayload,
+)
 from .prompts import PromptStore, compose_prompt
 from .search import SearchClient
 from .templates import TemplateStore
@@ -43,7 +52,7 @@ PPT_DESIGN_TIMEOUT_SECONDS = 300
 MATERIAL_TEXT_LIMIT = 6000
 PPT_PLAN_MATERIAL_LIMIT = 3200
 PPT_PLAN_TEMPLATE_LIMIT = 2600
-PPT_PLAN_VISUAL_CONTEXT_LIMIT = 1400
+VISUAL_CONTEXT_LIMIT = 8192
 JSON_CONTEXT_RETRY_ATTEMPTS = 1
 JSON_RETRY_EXCERPT_LIMIT = 4000
 
@@ -112,197 +121,13 @@ EXPRESSION_INFORMATION_UNIT_FIELDS = ("unit", "carrier")
 EXPRESSION_HIERARCHY_PLAN_FIELDS = ("levels", "alignment", "focus_region")
 VISUAL_ASSET_SEARCH_TERM_LIMIT = 8
 VISUAL_ASSET_SEARCH_RESULT_LIMIT = 3
-# Structured vocabulary shared with the Rust backend (prompts/global/visual_terms.json).
-VISUAL_TERMS_KEY = "global/visual_terms.json"
-# Categories whose search should target a brand mark rather than a physical object.
-VISUAL_LOGO_CATEGORIES = frozenset({"vendor", "model", "tool", "cloud", "infra", "database", "software", "robot_vendor"})
-VISUAL_OBJECT_CATEGORIES = frozenset({"robot", "sensor", "chip", "instrument"})
-_CJK_PATTERN = re.compile(r"[\u4e00-\u9fff]")
-_ALLCAPS_PATTERN = re.compile(r"^[A-Z0-9]+$")
-# 中文实物名词后缀：中文资料里的可视化主体几乎都以这些字收尾。
-# 英文大写启发式对中文完全失效，必须靠后缀反向抽取，否则中文资料抽词数为 0。
-VISUAL_ASSET_CN_SUFFIXES = (
-    "无人机",
-    "机器人",
-    "机械臂",
-    "传感器",
-    "反应釜",
-    "培养皿",
-    "培养箱",
-    "显微镜",
-    "光谱仪",
-    "离心机",
-    "示波器",
-    "激光器",
-    "发动机",
-    "换热器",
-    "催化剂",
-    "电解槽",
-    "晶圆",
-    "芯片",
-    "电极",
-    "电池",
-    "薄膜",
-    "涂层",
-    "探头",
-    "模组",
-    "阵列",
-    "支架",
-    "导管",
-    "样机",
-    "样品",
-    "试剂",
-    "装置",
-    "设备",
-    "仪器",
-    "机床",
-    "产线",
-    "车间",
-    "卫星",
-    "雷达",
-    "天线",
-    "车辆",
-    "船舶",
-    "飞行器",
-)
-VISUAL_ASSET_TERM_STOPWORDS = {
-    "A",
-    "An",
-    "And",
-    "Body",
-    "Card",
-    "Create",
-    "Data",
-    "Figure",
-    "Flow",
-    "Input",
-    "Material",
-    "Model",
-    "Output",
-    "Page",
-    "Prompt",
-    "Result",
-    "Slide",
-    "Template",
-    "The",
-    "Use",
-    "User",
-    # 数学/统计学人名与理论名：大写启发式会把它们当成产品，
-    # 检索「Lyapunov official logo」既浪费名额又可能让模型画出无意义的图形
-    "Bayes",
-    "Bayesian",
-    "Banach",
-    "Cauchy",
-    "Euler",
-    "Fourier",
-    "Gauss",
-    "Gaussian",
-    "Hessian",
-    "Hilbert",
-    "Jacobian",
-    "Lagrange",
-    "Laplace",
-    "Lipschitz",
-    "Lyapunov",
-    "Markov",
-    "Monte Carlo",
-    "Nash",
-    "Newton",
-    "Pareto",
-    "Poisson",
-    "Taylor",
-    "Bernoulli",
-    "Frobenius",
-    "Kullback",
-    "Leibler",
-    "Wasserstein",
-}
+# 识别主体的提示词资源；哪些词值得检索由模型读资料自己判断，不再维护主体词库。
+VISUAL_SUBJECTS_KEY = "global/visual_subjects.md"
 API_OUTPUT_PROMPT_PATTERN = re.compile(
     r"\b(?:size|quality|output_format|response_format|aspect_ratio|image_size|thinking_level|mime_type)\s*=\s*[^,.;\n]+[,.;]?\s*",
     re.IGNORECASE,
 )
 OUTPUT_SETTINGS_SENTENCE_PATTERN = re.compile(r"output settings preserved exactly:\s*[^.\n]*(?:\.|\n)?", re.IGNORECASE)
-
-
-def load_visual_terms(prompt_store: PromptStore) -> list[dict[str, Any]]:
-    """Read and validate `global/visual_terms.json`; mirrors Rust `VisualTerms::parse`."""
-    data = json.loads(prompt_store.load(VISUAL_TERMS_KEY)["content"])
-    if not isinstance(data, dict) or data.get("version") != 1:
-        raise ValueError("visual_terms.json version is not supported")
-    entries = data.get("entries")
-    if not isinstance(entries, list) or not entries:
-        raise ValueError("visual_terms.json has no entries")
-    normalized: list[dict[str, Any]] = []
-    for index, entry in enumerate(entries):
-        if not isinstance(entry, dict):
-            raise ValueError(f"visual_terms.json entry {index} is not an object")
-        term = str(entry.get("term") or "")
-        brand = str(entry.get("brand") or "")
-        aliases = entry.get("aliases") or []
-        if not term.strip() or not brand.strip():
-            raise ValueError(f"visual_terms.json entry {index} needs a non-empty term and brand")
-        if not isinstance(aliases, list) or any(not isinstance(alias, str) or not alias.strip() for alias in aliases):
-            raise ValueError(f"visual_terms.json entry {term} has an empty alias")
-        normalized.append(
-            {"term": term, "brand": brand, "category": str(entry.get("category") or ""), "aliases": list(aliases)}
-        )
-    return normalized
-
-
-class VisualTermMatcher:
-    """Precompiled vocabulary matcher; one-to-one with Rust `VisualTerms::find`."""
-
-    def __init__(self, entries: list[dict[str, Any]]) -> None:
-        self.entries = entries
-        self._matchers: list[tuple[int, re.Pattern[str] | None, str]] = [
-            (index, self._compile(alias), alias)
-            for index, entry in enumerate(entries)
-            for alias in (entry["term"], *entry["aliases"])
-        ]
-
-    @staticmethod
-    def _compile(alias: str) -> re.Pattern[str] | None:
-        # CJK strings match as plain substrings (None). Latin strings match on ASCII alphanumeric
-        # boundaries because `\b` treats CJK as `\w` and would miss `PyTorch框架`; all-caps acronyms
-        # stay case-sensitive so `robot arm` never hits `ARM`.
-        if _CJK_PATTERN.search(alias):
-            return None
-        body = r"\s+".join(re.escape(word) for word in alias.split())
-        flags = 0 if _ALLCAPS_PATTERN.match(alias.replace(" ", "")) else re.IGNORECASE
-        return re.compile(rf"(?:^|[^A-Za-z0-9])({body})(?:[^A-Za-z0-9]|$)", flags)
-
-    def find(self, text: str) -> list[dict[str, Any]]:
-        # Per entry keep the longest matched string; then drop hits whose matched string is a
-        # proper substring of another hit's (`Unitree` loses to `Unitree G1`); order by position.
-        best: list[tuple[str, int] | None] = [None] * len(self.entries)
-        for index, pattern, alias in self._matchers:
-            if pattern is None:
-                position = text.find(alias)
-                found = (alias, position) if position >= 0 else None
-            else:
-                match = pattern.search(text)
-                found = (match.group(1), match.start(1)) if match else None
-            if found is not None and (best[index] is None or len(found[0]) > len(best[index][0])):
-                best[index] = found
-        candidates = [(index, *slot) for index, slot in enumerate(best) if slot is not None]
-        lowered = [matched.lower() for _, matched, _ in candidates]
-        hits: list[dict[str, Any]] = []
-        for i, (index, matched, position) in enumerate(candidates):
-            if any(j != i and other != lowered[i] and lowered[i] in other for j, other in enumerate(lowered)):
-                continue
-            entry = self.entries[index]
-            hits.append(
-                {
-                    "term": entry["term"],
-                    "brand": entry["brand"],
-                    "category": entry["category"],
-                    "matched": matched,
-                    "position": position,
-                }
-            )
-        hits.sort(key=lambda hit: hit["position"])
-        return hits
-
 
 class DesignSchemaError(ValueError):
     """设计 JSON 已可解析但缺少必需结构化字段时抛出。"""
@@ -323,18 +148,6 @@ class JobManager:
         self.design = DesignClient()
         self.implement = ImplementClient()
         self.search = SearchClient()
-        self.visual_terms = self._load_visual_term_matcher(prompts)
-
-    @staticmethod
-    def _load_visual_term_matcher(prompts: PromptStore | None) -> VisualTermMatcher:
-        """A broken or missing vocabulary must never block startup; heuristics still work on an empty one."""
-        if prompts is None:
-            return VisualTermMatcher([])
-        try:
-            return VisualTermMatcher(load_visual_terms(prompts))
-        except Exception as exc:  # noqa: BLE001
-            logging.getLogger(__name__).warning("visual_terms.json unavailable, using empty vocabulary: %s", exc)
-            return VisualTermMatcher([])
 
     def create(self, request: JobCreateRequest) -> JobRecord:
         job_id = uuid.uuid4().hex
@@ -342,6 +155,7 @@ class JobManager:
         record = JobRecord(
             id=job_id,
             mode=request.mode,
+            payload=request.model_dump(),
             status="queued",
             stage="queued",
             message="任务已排队",
@@ -371,9 +185,9 @@ class JobManager:
         self._mark_stage(job_id, "started", "任务开始运行")
         try:
             if request.mode == "paper_figure":
-                await self._run_paper(job_id, PaperFigurePayload.model_validate(request.payload))
+                await self._run_paper(job_id, PaperFigurePayload.model_validate(request.payload), request.simple_mode)
             else:
-                await self._run_ppt(job_id, PptSlidePayload.model_validate(request.payload))
+                await self._run_ppt(job_id, PptSlidePayload.model_validate(request.payload), request.simple_mode)
         except Exception as exc:
             record = self.get(job_id)
             failed_stage = record.stage if record.stage not in {"queued", "started", "failed"} else None
@@ -400,15 +214,15 @@ class JobManager:
                 internal_artifacts=artifacts,
             )
 
-    async def _run_paper(self, job_id: str, payload: PaperFigurePayload) -> None:
+    async def _run_paper(self, job_id: str, payload: PaperFigurePayload, simple_mode: bool = False) -> None:
         """科研图两阶段 design：①仅 template 结构规划 ②结构+用户内容 → implement_prompt。"""
-        self._mark_stage(job_id, "paper_validate", "校验 Figure 输入")
+        self._mark_stage(job_id, "paper_validate", "校验输入")
         if not payload.template_ids:
             raise ValueError("Paper figure requires at least one template")
         design_profile = self.config.active_profile("design")
-        implement_profile = self.config.active_profile("implement")
+        implement_profile = None if simple_mode else self.config.active_profile("implement")
         proxy_url = self.config.proxy_url()
-        self._mark_stage(job_id, "paper_templates", "读取 template 和 few-shot 参考")
+        self._mark_stage(job_id, "paper_templates", "读取参考模板")
         selected = [self.templates.get(template_id) for template_id in payload.template_ids[:3]]
         selected_template_metadata = [self._template_metadata(item) for item in selected]
         template_images = [self._template_image_payload(item) for item in selected]
@@ -424,6 +238,27 @@ class JobManager:
             "Custom prompt": payload.custom_prompt or "None",
         }
         network_context = {"proxy_url": proxy_url}
+        # 视觉素材检索与幻灯片同源：先联网拿到产品/工具的客观外观描述，再作为
+        # 纯文本线索注入制图方案；图片只进结构分析那一个调用。
+        # 检索只吃标题与方法：约束（字体、底色一类）不是可检索的视觉主体。
+        search_material = "\n".join(
+            part
+            for part in (
+                payload.figure_title.strip(),
+                payload.section_description.strip(),
+            )
+            if part
+        )
+        visual_asset_prompt = ""
+        if self._optional_profile("search") is None:
+            self._mark_stage(job_id, "paper_visual_assets", "未配置联网查询模型，跳过视觉素材检索")
+        else:
+            self._mark_stage(job_id, "paper_visual_assets", "联网查询产品与工具的视觉素材")
+            subjects = await self._pick_visual_subjects(search_material, design_profile, proxy_url)
+            visual_asset_context = await self._build_visual_asset_context(subjects, proxy_url, job_id=job_id)
+            visual_asset_prompt = self._visual_asset_context_text(visual_asset_context)
+            self._append_design_log(job_id, "paper_visual_assets", "联网查询 · 视觉证据", self._visual_asset_log_text(visual_asset_context))
+            self._merge_artifacts(job_id, {"visual_asset_context": visual_asset_context})
 
         # —— Stage 1: 只看 template 图，抽取结构规划（不混入方法长文）——
         structure_assets = [
@@ -431,7 +266,7 @@ class JobManager:
             self.prompts.load("global/figure_style.md"),
             self.prompts.load("modes/paper_figure/structure.md"),
         ]
-        self._mark_stage(job_id, "paper_structure_prompt", "拼接 template 结构分析 prompt")
+        self._mark_stage(job_id, "paper_structure_prompt", "准备母版结构分析")
         structure_prompt, structure_prompt_assets = compose_prompt(
             structure_assets,
             {
@@ -456,11 +291,11 @@ class JobManager:
                 "structure_model_request": structure_request,
             },
         )
-        self._mark_stage(job_id, "paper_structure", "调用 design model 分析 template 结构")
+        self._mark_stage(job_id, "paper_structure", "分析母版结构")
         structure_text = await self.design.generate(
             design_profile, system_prompt, structure_prompt, template_images, proxy_url=proxy_url
         )
-        self._mark_stage(job_id, "paper_structure_parse", "解析并校验结构规划 JSON")
+        self._mark_stage(job_id, "paper_structure_parse", "校验结构规划")
         structure_json, structure_plan, structure_schema_retry = await self._parse_validate_or_fill_missing(
             design_profile,
             system_prompt,
@@ -490,16 +325,16 @@ class JobManager:
             self.prompts.load("modes/paper_figure/plot_rules.md"),
             self.prompts.load("modes/paper_figure/validator.md"),
         ]
-        self._mark_stage(job_id, "paper_prompt", "拼接内容填充与 implement prompt")
-        design_user_prompt, design_prompt_assets = compose_prompt(
-            design_assets,
-            {
-                "Structure Plan From Templates": json.dumps(structure_plan, ensure_ascii=False, indent=2),
-                "User Input": json.dumps(user_context, ensure_ascii=False, indent=2),
-                "Selected Template Metadata": template_summary,
-                "Output Contract": self._paper_contract(),
-            },
-        )
+        self._mark_stage(job_id, "paper_prompt", "准备内容填充")
+        design_sections = {
+            "Structure Plan From Templates": json.dumps(structure_plan, ensure_ascii=False, indent=2),
+            "User Input": json.dumps(user_context, ensure_ascii=False, indent=2),
+            "Selected Template Metadata": template_summary,
+        }
+        if visual_asset_prompt:
+            design_sections["Visual Asset Search Context"] = visual_asset_prompt
+        design_sections["Output Contract"] = self._paper_contract()
+        design_user_prompt, design_prompt_assets = compose_prompt(design_assets, design_sections)
         design_request = self._design_request_summary(
             design_profile, design_prompt_assets, design_user_prompt, []
         )
@@ -510,11 +345,11 @@ class JobManager:
                 "design_model_request": design_request,
             },
         )
-        self._mark_stage(job_id, "paper_design", "调用 design model 映射内容并生成制图方案")
+        self._mark_stage(job_id, "paper_design", "生成制图方案")
         design_text = await self.design.generate(
             design_profile, system_prompt, design_user_prompt, [], proxy_url=proxy_url
         )
-        self._mark_stage(job_id, "paper_parse", "解析并校验 design JSON")
+        self._mark_stage(job_id, "paper_parse", "校验制图方案")
 
         def _validate_design_with_content(data: dict[str, Any]) -> None:
             self._validate_paper_design(data)
@@ -540,11 +375,14 @@ class JobManager:
             {
                 "design_model_response": {"raw_text": design_text, "parsed_json": design_json},
                 "design_response": design_json,
-                "implement_model_request": self._implement_request_summary(implement_profile, implement_prompt, {}, 0),
+                "implement_model_request": None if simple_mode else self._implement_request_summary(implement_profile, implement_prompt, {}, 0),
                 "implement_prompts": [implement_prompt],
             },
         )
-        self._mark_stage(job_id, "paper_implement", "调用 implement model 生成图片")
+        if simple_mode:
+            self._finish_prompts(job_id, [implement_prompt])
+            return
+        self._mark_stage(job_id, "paper_implement", "生成图片")
         image_b64 = await self.implement.generate(implement_profile, implement_prompt, proxy_url=proxy_url)
         self._mark_stage(job_id, "paper_save", "保存生成图片")
         image = self._save_image(job_id, "paper_figure.png", image_b64)
@@ -560,16 +398,16 @@ class JobManager:
             },
         )
 
-    async def _run_ppt(self, job_id: str, payload: PptSlidePayload) -> None:
-        self._mark_stage(job_id, "ppt_validate", "校验 Slide 输入")
+    async def _run_ppt(self, job_id: str, payload: PptSlidePayload, simple_mode: bool = False) -> None:
+        self._mark_stage(job_id, "ppt_validate", "校验输入")
         app_config = self.config.load()
         design_profile = self.config.active_profile("design")
-        implement_profile = self.config.active_profile("implement")
+        implement_profile = None if simple_mode else self.config.active_profile("implement")
         page_plan_concurrency = self._resolve_ppt_concurrency(app_config.ppt_page_plan_concurrency, payload.page_count)
         image_concurrency = self._resolve_ppt_concurrency(app_config.ppt_image_concurrency, payload.page_count)
         proxy_url = self.config.proxy_url()
         ppt_design_timeout = max(design_profile.timeout_seconds, PPT_DESIGN_TIMEOUT_SECONDS)
-        self._mark_stage(job_id, "ppt_template", "读取 template 图片")
+        self._mark_stage(job_id, "ppt_template", "读取母版图片")
         template_path, template_mime = self.assets.get(payload.template_asset_id)
         template_image = {"filename": template_path.name, "mime_type": template_mime, "b64": image_to_b64(template_path)}
         self._mark_stage(job_id, "ppt_material", "整理资料输入")
@@ -577,10 +415,13 @@ class JobManager:
         material_context = self._compose_material_context(payload.material_text, material_assets)
         if not material_context.strip():
             raise ValueError("PPT slide requires material text or material files")
-        self._mark_stage(job_id, "ppt_visual_assets", "检索产品/工具视觉素材线索")
-        visual_asset_context = await self._build_visual_asset_context(material_context, proxy_url)
+        self._mark_stage(job_id, "ppt_visual_assets", "联网查询产品与工具的视觉素材")
+        # 检索只吃资料与附件：约束（字体、底色一类）不是可检索的视觉主体。
+        subjects = await self._pick_visual_subjects(material_context, design_profile, proxy_url)
+        visual_asset_context = await self._build_visual_asset_context(subjects, proxy_url, job_id=job_id)
         visual_asset_prompt = self._visual_asset_context_text(visual_asset_context)
-        ppt_output = self._ppt_output_defaults(implement_profile)
+        self._append_design_log(job_id, "ppt_visual_assets", "联网查询 · 视觉证据", self._visual_asset_log_text(visual_asset_context))
+        ppt_output = {} if simple_mode else self._ppt_output_defaults(implement_profile)
         normalized_input = {
             "template_asset_id": payload.template_asset_id,
             "material_text": payload.material_text.strip(),
@@ -629,7 +470,7 @@ class JobManager:
                 ),
             },
         )
-        self._mark_stage(job_id, "ppt_analyze", "调用 design model 分析 template")
+        self._mark_stage(job_id, "ppt_analyze", "分析母版版式")
         analysis_text = await self.design.generate(
             design_profile,
             analyzer_assets[0]["content"],
@@ -638,7 +479,7 @@ class JobManager:
             timeout_seconds=ppt_design_timeout,
             proxy_url=proxy_url,
         )
-        self._mark_stage(job_id, "ppt_parse_template", "解析 template 分析结果")
+        self._mark_stage(job_id, "ppt_parse_template", "校验母版分析结果")
         template_analysis, _, template_schema_retry = await self._parse_validate_or_fill_missing(
             design_profile,
             analyzer_assets[0]["content"],
@@ -657,8 +498,8 @@ class JobManager:
         ]
         compact_template_analysis = self._compact_template_analysis(template_analysis)
         compact_material_context = self._truncate_text(material_context, PPT_PLAN_MATERIAL_LIMIT)
-        compact_visual_asset_prompt = self._truncate_text(visual_asset_prompt, PPT_PLAN_VISUAL_CONTEXT_LIMIT)
-        self._mark_stage(job_id, "ppt_outline_prompt", "拼接整套大纲规划 prompt")
+        compact_visual_asset_prompt = visual_asset_prompt
+        self._mark_stage(job_id, "ppt_outline_prompt", "准备整套大纲规划")
         outline_prompt, outline_prompt_assets = compose_prompt(
             page_assets,
             {
@@ -697,7 +538,7 @@ class JobManager:
                 ),
             },
         )
-        self._mark_stage(job_id, "ppt_outline", "调用 design model 规划整套大纲")
+        self._mark_stage(job_id, "ppt_outline", "规划整套大纲")
         outline_text = await self.design.generate(
             design_profile,
             page_assets[0]["content"],
@@ -706,7 +547,7 @@ class JobManager:
             timeout_seconds=ppt_design_timeout,
             proxy_url=proxy_url,
         )
-        self._mark_stage(job_id, "ppt_parse_outline", "解析并校验整套大纲")
+        self._mark_stage(job_id, "ppt_parse_outline", "校验整套大纲")
         outline_json, deck_outline, outline_schema_retry = await self._parse_validate_or_fill_missing(
             design_profile,
             page_assets[0]["content"],
@@ -718,7 +559,7 @@ class JobManager:
             proxy_url=proxy_url,
         )
         page_briefs = deck_outline["page_briefs"]
-        self._mark_stage(job_id, "ppt_page_plan_queue", f"按并发 {page_plan_concurrency} 排队规划 {payload.page_count} 页")
+        self._mark_stage(job_id, "ppt_page_plan_queue", f"排队规划 {payload.page_count} 页")
         page_results = await self._run_in_ordered_batches(
             page_briefs,
             page_plan_concurrency,
@@ -739,10 +580,18 @@ class JobManager:
             ),
         )
         pages_json = {"pages": [result["page"] for result in page_results]}
-        self._mark_stage(job_id, "ppt_merge_pages", "合并并校验页面规划")
+        self._mark_stage(job_id, "ppt_merge_pages", "汇总页面规划")
         pages = self._validate_ppt_pages(pages_json, payload.page_count, template_analysis)
         pages = self._apply_ppt_master_prompt_prefix(pages, template_analysis)
-        self._mark_stage(job_id, "ppt_implement_queue", f"按并发 {image_concurrency} 排队生成图片")
+        if simple_mode:
+            self._merge_artifacts(job_id, {
+                "page_plan": pages,
+                "design_response": {"template_analysis": template_analysis, "deck_outline": deck_outline, "pages": pages},
+                "implement_prompts": [page["implement_prompt"] for page in pages],
+            })
+            self._finish_prompts(job_id, [page["implement_prompt"] for page in pages])
+            return
+        self._mark_stage(job_id, "ppt_implement_queue", "排队生成图片")
         implement_results = await self._run_in_ordered_batches(
             pages,
             image_concurrency,
@@ -816,7 +665,7 @@ class JobManager:
         proxy_url: str | None,
     ) -> dict[str, Any]:
         page_number = int(page_brief.get("page") or 0)
-        self._mark_stage(job_id, f"ppt_page_prompt_{page_number}", f"拼接第 {page_number} 页规划 prompt")
+        self._mark_stage(job_id, f"ppt_page_prompt_{page_number}", f"准备第 {page_number} 页规划")
         page_prompt, page_prompt_assets = compose_prompt(
             page_assets,
             {
@@ -990,9 +839,70 @@ class JobManager:
             sections.append(f"{header}\n{excerpt}")
         return "\n\n---\n\n".join(sections)
 
-    async def _build_visual_asset_context(self, material_context: str, proxy_url: str | None = None) -> dict[str, Any]:
-        hits = self._extract_visual_asset_hits(material_context)
-        terms = [hit["term"] for hit in hits]
+    async def _pick_visual_subjects(
+        self, material_context: str, design_profile, proxy_url: str | None = None
+    ) -> list[str]:
+        """让模型挑出资料里值得检索真实外观的主体。
+
+        内部固定流程：不写设计日志、不单独占一个阶段。识别失败、提示词缺失或没有可用主体
+        时返回空列表，检索阶段随之降级（图照画，只是没有客观外观描述可依）。
+        """
+        text = (material_context or "")[:MATERIAL_TEXT_LIMIT].strip()
+        if not text:
+            return []
+        try:
+            system_prompt = self.prompts.load(VISUAL_SUBJECTS_KEY)["content"]
+        except Exception:  # noqa: BLE001 提示词缺失不该让任务失败，退化成“没有主体”
+            return []
+        try:
+            reply = await self.design.generate(design_profile, system_prompt, text, [], proxy_url=proxy_url)
+        except Exception:  # noqa: BLE001 同 Rust：识别失败＝没有主体
+            return []
+        return self._visual_subjects_from_reply(reply, text)
+
+    @staticmethod
+    def _visual_subjects_from_reply(reply: str, material: str) -> list[str]:
+        """取回复里第一个 JSON 数组，并只留下真的出现在资料原文里的候选。
+
+        大小写、空格与标点不计差异（`Grok Bot` 对得上原文 `grokbot`），所以模型无法凭记忆塞进
+        一个原文没提过的品牌；顺带保证字体、色值这类约束描述不会被当成视觉主体。
+        """
+        if not isinstance(reply, str):
+            return []
+        start, end = reply.find("["), reply.rfind("]")
+        if start < 0 or end < start:
+            return []
+        try:
+            items = json.loads(reply[start : end + 1])
+        except (ValueError, TypeError):
+            return []
+        if not isinstance(items, list):
+            return []
+        haystack = JobManager._compact_for_match(material)
+        seen: set[str] = set()
+        subjects: list[str] = []
+        for item in items:
+            if not isinstance(item, str):
+                continue
+            subject = item.strip()
+            key = JobManager._compact_for_match(subject)
+            if not key or key in seen or key not in haystack:
+                continue
+            seen.add(key)
+            subjects.append(subject)
+            if len(subjects) >= VISUAL_ASSET_SEARCH_TERM_LIMIT:
+                break
+        return subjects
+
+    @staticmethod
+    def _compact_for_match(text: str) -> str:
+        """只留字母数字并折叠大小写，用于判断候选是否真的出自原文。"""
+        return "".join(ch for ch in text.lower() if ch.isalnum())
+
+    async def _build_visual_asset_context(
+        self, subjects: list[str], proxy_url: str | None = None, *, job_id: str | None = None
+    ) -> dict[str, Any]:
+        """逐主体检索，每个主体一次查询，报文与原始返回先写进设计日志再决定冒泡还是降级。"""
         search_profile = self.config.active_profile("search")
         search_meta = {
             "profile_id": search_profile.id,
@@ -1001,7 +911,7 @@ class JobManager:
             "base_url": search_profile.base_url,
             "has_api_key": bool(search_profile.api_key),
         }
-        if not terms:
+        if not subjects:
             return {
                 "enabled": True,
                 "degraded": True,
@@ -1012,251 +922,164 @@ class JobManager:
             }
         max_results = int((search_profile.output_defaults or {}).get("max_results") or VISUAL_ASSET_SEARCH_RESULT_LIMIT)
         max_results = max(1, min(8, max_results))
-        tasks = [self._search_visual_asset_term(hit, search_profile, proxy_url, max_results=max_results) for hit in hits]
+        tasks = [
+            self._search_visual_asset_term(subject, search_profile, proxy_url, max_results=max_results)
+            for subject in subjects
+        ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
+        # 每次检索实际发出去的报文与原始返回都写进设计日志（界面在进度下方展示）。
+        # 先记再抛：grok 失败会让任务失败，但失败的那次调用同样要能复盘。
+        self._append_search_traces(job_id, subjects, results)
         items: list[dict[str, Any]] = []
-        errors: list[str] = []
-        for hit, result in zip(hits, results, strict=False):
+        for subject, result in zip(subjects, results, strict=False):
             if isinstance(result, Exception):
-                errors.append(f"{hit['term']}: {safe_error_message(result)}")
-                items.append(
-                    {
-                        **self._visual_asset_item_fields(hit),
-                        "results": [],
-                        "error": safe_error_message(result),
-                        "provider": search_profile.protocol,
-                    }
-                )
-                continue
-            items.append(result)
+                # 检索任务自身炸了（不是某次请求失败）：也要能按协议决定冒泡还是降级。
+                item = {"term": subject, "query": subject, "results": [], "provider": search_profile.protocol}
+                failure: Exception | None = result
+            else:
+                item, failure = result
+            if failure is not None:
+                item["error"] = safe_error_message(failure)
+                # 检索失败就是失败：路由、鉴权、限流、反爬页都得让任务看见。
+                # 降级成“没有来源”会把基础设施问题伪装成“这个主体查不到”，
+                # 用户既看不到原因，还会拿着一份没有依据的图继续跑完。
+                # 报文已经先写进设计日志，这里原样冒泡。
+                raise failure
+            items.append(item)
         has_sources = any(item.get("results") for item in items)
         return {
             "enabled": True,
             "degraded": not has_sources,
-            "terms": terms,
+            "terms": list(subjects),
             "items": items,
-            "errors": errors,
             "search_profile": search_meta,
             "message": "Use only text summaries and source URLs; no network image is downloaded, cached, or passed to the implement model.",
         }
 
-    def _extract_visual_asset_terms(self, material_context: str) -> list[str]:
-        return [hit["term"] for hit in self._extract_visual_asset_hits(material_context)]
-
-    def _extract_visual_asset_hits(self, material_context: str) -> list[dict[str, Any]]:
-        """Vocabulary hits (by first occurrence) followed by heuristic candidates the vocabulary
-        does not already cover, capped at VISUAL_ASSET_SEARCH_TERM_LIMIT. Mirrors Rust
-        `extract_visual_asset_hits`."""
-        text = material_context[:MATERIAL_TEXT_LIMIT]
-        vocabulary_hits = self.visual_terms.find(text)
-        candidates = [
-            candidate
-            for candidate in self._heuristic_visual_candidates(text)
-            if not self._covered_by_vocabulary(candidate, vocabulary_hits)
-        ]
-        # Normalization inside dedupe can fold a candidate onto a vocabulary term
-        # (`PyTorch框架` -> `PyTorch`), so the coverage check runs again afterwards.
-        heuristic = [
-            {
-                "term": term,
-                "brand": None,
-                "category": None,
-                "matched": None,
-                "position": text.find(term) if term in text else len(text),
-            }
-            for term in self._dedupe_visual_asset_terms(candidates)
-            if not self._covered_by_vocabulary(term, vocabulary_hits)
-        ]
-        return [*vocabulary_hits, *heuristic][:VISUAL_ASSET_SEARCH_TERM_LIMIT]
-
-    @classmethod
-    def _covered_by_vocabulary(cls, candidate: str, hits: list[dict[str, Any]]) -> bool:
-        """A heuristic candidate is redundant when it equals or is a fragment of a vocabulary hit's
-        matched string / canonical term (`GLM-4.5` vs `Zhipu`), or when it contains that string as a
-        whole word (`ARM Cortex-A78` vs `ARM`; but `Spectrum` is not covered by `CT`)."""
-        normalized = " ".join(candidate.split()).lower()
-        for hit in hits:
-            for known in (hit.get("matched"), hit["term"]):
-                if not known:
-                    continue
-                known = " ".join(str(known).split()).lower()
-                if normalized in known or cls._contains_word(normalized, known):
-                    return True
-        return False
-
-    @staticmethod
-    def _contains_word(haystack: str, needle: str) -> bool:
-        start = haystack.find(needle)
-        while start >= 0:
-            end = start + len(needle)
-            before_ok = start == 0 or not (haystack[start - 1].isascii() and haystack[start - 1].isalnum())
-            after_ok = end == len(haystack) or not (haystack[end].isascii() and haystack[end].isalnum())
-            if before_ok and after_ok:
-                return True
-            start = haystack.find(needle, end)
-        return False
-
-    @classmethod
-    def _heuristic_visual_candidates(cls, text: str) -> list[str]:
-        """中文实物名词 → 英文大写启发式。中文一路是必需的：英文大写规则在纯中文资料上命中数为 0。"""
-        # 中文实物名词：后缀前再吃 0-4 个汉字作为修饰语（如「高分辨质谱仪」）。
-        # 前缀不得跨越虚词/方位词，否则「扫描电镜对样品」会被抽成「描电镜对样品」。
-        suffix_group = "|".join(re.escape(suffix) for suffix in VISUAL_ASSET_CN_SUFFIXES)
-        boundary = "对与和及或的了在从由被把将用以为并中后前时上下等则若使可将其该本此这那每各"
-        chinese = [
-            match.group(0)
-            for match in re.finditer(
-                rf"(?:(?![{boundary}])[一-鿿]){{0,4}}(?:{suffix_group})", text
-            )
-        ]
-
-        english: list[str] = []
-        for pattern in (
-            r"\b[A-Z][A-Za-z0-9.+#-]{1,}(?:\s+[A-Z0-9][A-Za-z0-9.+#-]{1,}){0,2}\b",
-            r"\b[A-Z]{2,}(?:[-\s][A-Z0-9]{2,}){0,2}\b",
-            r"\b[A-Za-z][A-Za-z0-9.+#-]{1,}\s*(?:平台|工具|框架|模型|软件|系统|设备)\b",
-        ):
-            english.extend(match.group(0) for match in re.finditer(pattern, text))
-
-        # 按出现频次给中文名词排序，让反复提到的主体优先占用检索名额
-        chinese.sort(key=lambda term: text.count(term), reverse=True)
-        return [*chinese, *english]
-
-    @staticmethod
-    def _dedupe_visual_asset_terms(candidates: list[str]) -> list[str]:
-        normalized: list[str] = []
-        seen: set[str] = set()
-        stopwords_lower = {item.lower() for item in VISUAL_ASSET_TERM_STOPWORDS}
-        for candidate in candidates:
-            term = re.sub(r"\s+", " ", candidate).strip(" ,.;:()[]{}<>，。；：（）【】")
-            # 剥掉数量词与指示词前缀：「一套检测设备」→「检测设备」。
-            # 只剥通用量词，保留「六旋翼无人机」这类有描述意义的数词短语。
-            term = re.sub(r"^[一二三四五六七八九十百千两0-9]+[套台个批组种类款部只条张片辆架]", "", term)
-            term = re.sub(r"^(?:该|本|其|此|这|那|各|每|所述|上述|相应|对应)", "", term).strip()
-            # 只在「Latin 前缀 + 中文类别词」时剥类别后缀（PyTorch框架 → PyTorch）；
-            # 纯中文实物名词必须保留完整，否则「检测设备」会被削成「检测」
-            stripped = re.sub(r"\s*(平台|工具|框架|模型|软件|系统|设备)$", "", term).strip()
-            if stripped and stripped != term and re.search(r"[A-Za-z]", stripped):
-                term = stripped
-            if len(term) < 2 or len(term) > 48:
-                continue
-            if term.lower() in stopwords_lower:
-                continue
-            key = term.lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            normalized.append(term)
-
-        # 同源词只留最短的那个：短形通常是干净的中心词，长形往往粘了动词/方位词
-        # （「置于培养箱」→「培养箱」，「激光雷达传感器」→「激光雷达」）
-        terms: list[str] = []
-        for term in normalized:
-            if any(other != term and other in term for other in normalized):
-                continue
-            terms.append(term)
-            if len(terms) >= VISUAL_ASSET_SEARCH_TERM_LIMIT:
-                break
-        return terms
-
-    @staticmethod
-    def _visual_asset_search_query(term: str, brand: str | None = None, category: str | None = None) -> str:
-        """Logo-type categories search for the brand mark, object-type categories for the product
-        appearance; unknown/absent categories keep the legacy sentences. Same templates as Rust."""
-        brand = (brand or "").strip()
-        if brand.lower() == term.lower():
-            brand = ""
-        is_logo = category in VISUAL_LOGO_CATEGORIES
-        is_object = category in VISUAL_OBJECT_CATEGORIES
-        if _CJK_PATTERN.search(term):
-            subject = f"{term} {brand}" if brand else term
-            if is_logo:
-                return f"{subject} 官方logo 品牌标识 视觉描述"
-            return f"{subject} 实物外观 外形结构 产品图片 特征描述"
-        subject = f"{brand} {term}" if brand else term
-        if is_logo:
-            return f"{subject} official logo brand mark visual description"
-        if is_object:
-            return f"{subject} product appearance what it looks like visual description"
-        return f"{term} official logo product appearance what it looks like visual description"
-
-    @staticmethod
-    def _visual_asset_item_fields(hit: dict[str, Any]) -> dict[str, Any]:
-        fields = {"term": hit["term"]}
-        for key in ("brand", "category", "matched"):
-            if hit.get(key):
-                fields[key] = hit[key]
-        fields["query"] = JobManager._visual_asset_search_query(hit["term"], hit.get("brand"), hit.get("category"))
-        return fields
-
     async def _search_visual_asset_term(
         self,
-        hit: dict[str, Any],
+        subject: str,
         search_profile,
         proxy_url: str | None = None,
         *,
         max_results: int = VISUAL_ASSET_SEARCH_RESULT_LIMIT,
-    ) -> dict[str, Any]:
-        fields = self._visual_asset_item_fields(hit)
+    ) -> tuple[dict[str, Any], Exception | None]:
+        call = await self.search.search(
+            search_profile,
+            subject,
+            max_results=max_results,
+            proxy_url=proxy_url,
+        )
+        item: dict[str, Any] = {
+            "term": subject,
+            "query": subject,
+            "results": call.results,
+            "provider": search_profile.protocol,
+            "request": call.request,
+            "response": call.response,
+        }
+        if call.error is not None:
+            item["error"] = safe_error_message(call.error)
+        # 错误不在这里抛：调用方要先记录报文，再决定是冒泡（grok）还是降级。
+        return item, call.error
+
+    def _append_design_log(self, job_id: str | None, step: str, label: str, content: str) -> None:
+        """写一行设计日志（同 step 覆盖旧的，不重复累积）。"""
+        from .models import JobDesignLog
+
+        if not job_id:
+            return
+        logs = [log for log in self.get(job_id).design_logs if log.step != step]
+        logs.append(
+            JobDesignLog(step=step, label=label, status="succeeded", content=content, timestamp=now_iso())
+        )
+        self._update(job_id, design_logs=logs)
+
+    def _optional_profile(self, role: str) -> ModelProfile | None:
+        """检索是加分项而不是前提：没有配检索模型时，图照样能画。"""
         try:
-            results = await self.search.search(
-                search_profile,
-                fields["query"],
-                max_results=max_results,
-                proxy_url=proxy_url,
-            )
-            return {**fields, "results": results, "provider": search_profile.protocol}
-        except Exception as exc:
-            return {
-                **fields,
-                "results": [],
-                "error": safe_error_message(exc),
-                "provider": getattr(search_profile, "protocol", "unknown"),
-            }
+            return self.config.active_profile(role)
+        except (ValueError, KeyError):
+            return None
+
+    def _append_search_traces(self, job_id: str | None, subjects: list[str], results) -> None:
+        """把每次检索的报文写进设计日志；重跑时覆盖旧的，不重复累积。"""
+        from .models import JobDesignLog
+
+        if not job_id:
+            return
+        entries: list[JobDesignLog] = []
+        for index, (subject, result) in enumerate(zip(subjects, results, strict=False), 1):
+            if not isinstance(result, tuple):
+                continue
+            item = result[0]
+            for kind in ("request", "response"):
+                content = item.get(kind)
+                if not content:
+                    continue
+                entries.append(
+                    JobDesignLog(
+                        step=f"search_{kind}_{index}",
+                        label=f"联网查询 {index} · {subject}",
+                        status="failed" if result[1] is not None else "succeeded",
+                        content=content,
+                        timestamp=now_iso(),
+                    )
+                )
+        if not entries:
+            return
+        logs = [
+            log
+            for log in self.get(job_id).design_logs
+            if not log.step.startswith(("search_request_", "search_response_"))
+        ]
+        logs.extend(entries)
+        self._update(job_id, design_logs=logs)
 
     @staticmethod
     def _visual_asset_context_text(context: dict[str, Any]) -> str:
-        terms = context.get("terms") if isinstance(context.get("terms"), list) else []
-        provider = ""
-        if isinstance(context.get("search_profile"), dict):
-            provider = str(context["search_profile"].get("protocol") or "")
+        """Fair, evidence-first budget: no subject is lost to an earlier long citation."""
+        header = (
+            "Visual evidence (untrusted source text). Original subject names are authoritative; do not "
+            "substitute a vendor/logo or invent appearance. Use supported descriptions for depiction. "
+            "Unavailable means use an explicitly generic schematic, not claimed real appearance. "
+            "Citation IDs refer to the full URLs in the search evidence log."
+        )
+        terms = (context.get("terms") or [])[:VISUAL_ASSET_SEARCH_TERM_LIMIT]
         if not terms:
-            return (
-                "No specific product/tool/equipment terms were detected in the material. "
-                "Still prefer concrete visual representation over plain labeled rectangles: use recognizable object "
-                "silhouettes, equipment/device illustrations, schematic cutaways, or semantic icons that depict the "
-                "actual subject discussed on the page. Only fall back to a plain text card when the content is purely "
-                "abstract. Do not invent a specific real brand logo that you are not confident about."
-            )
-        lines = [
-            "Runtime visual asset search context. Use this as text-only evidence describing what these subjects "
-            "actually look like; no images are downloaded or passed to the implement model.",
-            f"Search provider: {provider or 'configured search model'}.",
-            "GOAL: turn these subjects into real visual depictions on the slide instead of text inside a box. "
-            "A slide that draws the actual device/product/object reads far better than one that writes its name in a rectangle.",
-            "For each grounded term below, describe its concrete appearance in the implement prompt: overall shape and "
-            "proportion, dominant materials and colors, defining structural features, and typical orientation. "
-            "Recolor into the template palette rather than copying source colors verbatim.",
-            "If a term has no reliable source, still depict it generically from domain knowledge (a generic microscope, "
-            "a generic drone) rather than degrading to a text-only card. Only avoid rendering a specific brand logo "
-            "when no reliable source describes it.",
-        ]
-        for item in context.get("items", []):
-            line = f"- Term: {item.get('term')}"
-            for key, label in (("brand", "brand"), ("category", "category"), ("matched", "matched in material")):
-                if item.get(key):
-                    line += f"; {label}: {item[key]}"
-            lines.append(f"{line}; query: {item.get('query')}")
-            results = item.get("results") if isinstance(item.get("results"), list) else []
+            return header + "\nNo specific subjects detected; visual evidence unavailable."
+        items = context.get("items") or []
+        budget = (VISUAL_CONTEXT_LIMIT - len(header) - 1) // len(terms)
+        lines = [header]
+        for index, term in enumerate(terms):
+            item = items[index] if index < len(items) else {}
+            name = item.get("term") or term
+            # Pathologically long names cannot consume another subject's allocation.
+            label = f"- Subject: {str(name)[:budget // 4]}\n"
+            results = SearchClient.filter_results(item.get("results") or [])
             if not results:
-                reason = item.get("error") or "no reliable result"
-                lines.append(
-                    f"  Source status: {reason}. Depict this subject generically from domain knowledge; "
-                    "avoid brand-specific marks."
-                )
+                lines.append(label + "  Visual evidence unavailable. No supported description/citation.")
                 continue
-            for result in results:
-                lines.append(f"  Source: {result.get('title')} | {result.get('url')} | {result.get('snippet')}")
+            per_source = (budget - len(label) - 1) // min(len(results), VISUAL_ASSET_SEARCH_RESULT_LIMIT)
+            sources = []
+            for source_index, result in enumerate(results[:VISUAL_ASSET_SEARCH_RESULT_LIMIT], 1):
+                citation = f"[{index + 1}.{source_index}]"
+                description = result["snippet"][:max(1, per_source // 2)]
+                prefix = f"  {citation} {description}\n  Source: "
+                remaining = max(0, per_source - len(prefix) - 1)
+                url = result["url"]
+                reference = url if len(url) <= remaining else f"{citation} (full URL in search log)"
+                sources.append(prefix + reference)
+            lines.append(label + "\n".join(sources))
+        return "\n".join(lines)
+
+    @classmethod
+    def _visual_asset_log_text(cls, context: dict[str, Any]) -> str:
+        # Full filtered references are persisted separately from the planner's bounded context.
+        lines = [cls._visual_asset_context_text(context), "\nFull source references:"]
+        for index, item in enumerate((context.get("items") or [])[:VISUAL_ASSET_SEARCH_TERM_LIMIT], 1):
+            for source_index, result in enumerate(SearchClient.filter_results(item.get("results") or []), 1):
+                lines.append(f"[{index}.{source_index}] {result['snippet']} | {result['title']} | {result['url']}")
         return "\n".join(lines)
 
     @staticmethod
@@ -1461,11 +1284,23 @@ class JobManager:
                 result["suggestion"] = f"请检查 {str(role).capitalize()} 配置的地址、协议、模型名和密钥。"
         return result
 
+    def _finish_prompts(self, job_id: str, prompts: list[str]) -> None:
+        from .models import JobDesignLog
+
+        if not prompts or any(not prompt.strip() for prompt in prompts):
+            raise ValueError("Final drawing prompts are empty")
+        logs = [log for log in self.get(job_id).design_logs if not log.step.startswith("final_prompt_")]
+        logs.extend(JobDesignLog(step=f"final_prompt_{index}", label=f"最终制图提示词 {index}",
+                                 status="succeeded", content=prompt, timestamp=now_iso())
+                    for index, prompt in enumerate(prompts, 1))
+        self._update(job_id, design_logs=logs)
+        self._mark_stage(job_id, "completed", "最终制图提示词已生成", status="succeeded", event_status="succeeded", images=[])
+
     def _update(self, job_id: str, **changes) -> None:
         record = self.get(job_id)
         next_record = record.model_copy(update={"updated_at": now_iso(), **changes})
-        self.jobs[job_id] = next_record
         self._persist(next_record)
+        self.jobs[job_id] = next_record
 
     def _persist(self, record: JobRecord) -> None:
         job_dir = self.root / record.id
@@ -2080,7 +1915,15 @@ class JobManager:
             "profile": public_profile_snapshot(profile),
             "prompt_assets": prompt_assets,
             "prompt": prompt,
-            "reference_images": [{"filename": image["filename"], "mime_type": image["mime_type"]} for image in images],
+            "reference_images": [
+                {
+                    "filename": image["filename"],
+                    "mime_type": image["mime_type"],
+                    "base64_chars": len(image.get("b64") or ""),
+                    "bytes": len(image.get("b64") or "") // 4 * 3,
+                }
+                for image in images
+            ],
         }
         if timeout_seconds is not None:
             summary["timeout_seconds"] = timeout_seconds

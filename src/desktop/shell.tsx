@@ -12,7 +12,7 @@ import {
   openExternal,
   saveConfig
 } from '../api';
-import { copy, emptyConfig, isJobSettled, Settings, SettingsSection, type Lang } from '../app';
+import { copy, emptyConfig, isJobSettled, Settings, SettingsSection, SimpleModeSwitch, type Lang } from '../app';
 import type { AppConfig, JobRecord } from '../types';
 import { AboutPage, IconGitHub, type UpdateState } from './about';
 import { desktopCopy, type DesktopCopy } from './copy';
@@ -26,6 +26,7 @@ import {
   type SlideFormState
 } from './forms';
 import { TemplateLibrary } from './templates';
+import { splitRules } from './style_picker';
 import {
   activeTab,
   addTab,
@@ -46,7 +47,9 @@ import {
   autoUpdateEnabled,
   initialTheme,
   saveAutoUpdate,
+  saveSimpleMode,
   saveTheme,
+  simpleModePreference,
   themePreference,
   type Theme
 } from './prefs';
@@ -54,15 +57,36 @@ import {
 type Page = 'paper' | 'ppt' | 'templates' | 'history' | 'workbench' | 'settings' | 'about';
 type Copy = (typeof copy)[Lang];
 
-const supportsViewTransitions = typeof document !== 'undefined' && 'startViewTransition' in document;
+// WebKitGTK 2.50 的 View Transition 会在 Linux 桌面端 SIGSEGV（tauri-apps/tauri#14721）。
+// 这里也不再给滚动容器播位移动画：WebKit 不会把它交给合成器，切页的 240ms 里整页都在主线程重画。
+const supportsViewTransitions =
+  typeof document !== 'undefined' &&
+  'startViewTransition' in document &&
+  !(desktopAvailable() && /Linux/.test(navigator.userAgent));
 let startupUpdateStarted = false;
+
+function paneClass(id: Page, current: Page, viewTransition: boolean): string {
+  const active = id === current;
+  return [
+    'desktop-pane',
+    active ? 'is-active' : '',
+    active && id === 'history' ? 'clips' : '',
+    active && viewTransition ? 'has-view-transition' : ''
+  ]
+    .filter(Boolean)
+    .join(' ');
+}
 
 export function DesktopApp() {
   const [page, setPage] = useState<Page>('paper');
+  // Pages stay mounted after the first visit. Unmounting rebuilt the form,
+  // the history grid, or the workbench canvas on every click.
+  const [visited, setVisited] = useState<ReadonlySet<Page>>(() => new Set(['paper']));
   const [lang, setLang] = useState<Lang>('zh');
   const [theme, setTheme] = useState<Theme>(initialTheme);
   const [followsSystem, setFollowsSystem] = useState(() => themePreference() === null);
   const [autoUpdate, setAutoUpdate] = useState(autoUpdateEnabled);
+  const [simpleMode, setSimpleMode] = useState(simpleModePreference);
   const [update, setUpdate] = useState<UpdateState>({ status: 'idle', info: null, error: null });
   const [config, setConfig] = useState<AppConfig>(emptyConfig);
   const [toast, setToast] = useState<{ id: number; text: string; tone: 'info' | 'error' } | null>(null);
@@ -96,7 +120,9 @@ export function DesktopApp() {
         showMessage(d.recent.rerunUnavailable, 'error');
         return;
       }
-      const created = await createJob(full.payload);
+      // The rerun copies the stored envelope but takes today's switch: the job
+      // about to run is a new job, and the mode is what the user sees selected.
+      const created = await createJob({ ...full.payload, simple_mode: simpleMode });
       // The rerun reuses the stored payload, so the tab has to show the same
       // inputs it was built from; otherwise the panel contradicts the job. It
       // opens in a fresh tab so whatever the user was drafting stays put.
@@ -119,15 +145,20 @@ export function DesktopApp() {
   const t = copy[lang];
   const d = desktopCopy[lang];
 
+  const showPage = (nextPage: Page) => {
+    setPage(nextPage);
+    setVisited((current) => (current.has(nextPage) ? current : new Set(current).add(nextPage)));
+  };
+
   const transitionToPage = async (nextPage: Page): Promise<boolean> => {
     if (nextPage === page) return true;
     if (page === 'workbench' && workbenchLeaveGuard.current && !(await workbenchLeaveGuard.current())) return false;
     if (supportsViewTransitions && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
       (document as any).startViewTransition(() => {
-        setPage(nextPage);
+        showPage(nextPage);
       });
     } else {
-      setPage(nextPage);
+      showPage(nextPage);
     }
     return true;
   };
@@ -238,6 +269,11 @@ export function DesktopApp() {
     setAutoUpdate(enabled);
   }
 
+  function changeSimpleMode(enabled: boolean) {
+    saveSimpleMode(enabled);
+    setSimpleMode(enabled);
+  }
+
   async function openUrl(url: string) {
     try {
       await openExternal(url);
@@ -280,7 +316,7 @@ export function DesktopApp() {
     setFigureBook((book) => {
       const existing = tabForJob(book, job.id);
       if (existing) return selectTab(patchTab(book, existing.id, () => ({ job })), existing.id);
-      const form = figureFormFrom(payload, defaultFigureForm);
+      const form = figureFormFrom(payload, defaultFigureForm, d.style);
       const next = addTab(book, form, job);
       if (next !== book) return next;
       showMessage(d.tasks.full(MAX_TABS), 'error');
@@ -293,7 +329,7 @@ export function DesktopApp() {
     setSlideBook((book) => {
       const existing = tabForJob(book, job.id);
       if (existing) return selectTab(patchTab(book, existing.id, () => ({ job })), existing.id);
-      const form = slideFormFrom(payload, defaultSlideForm);
+      const form = slideFormFrom(payload, defaultSlideForm, d.style);
       const next = addTab(book, form, job);
       if (next !== book) return next;
       showMessage(d.tasks.full(MAX_TABS), 'error');
@@ -304,7 +340,7 @@ export function DesktopApp() {
   // Drop template ids that no longer exist so the picker and the ready flag
   // stay truthful. Runs after the tab exists, on whichever tab holds the job.
   function pruneFigureTemplates(payload: unknown) {
-    const ids = figureFormFrom(payload, defaultFigureForm).selected;
+    const ids = figureFormFrom(payload, defaultFigureForm, d.style).selected;
     if (ids.length === 0) return;
     listTemplates('all', '')
       .then((templates) => {
@@ -405,108 +441,132 @@ export function DesktopApp() {
             <h1>{head.title(t, d)}</h1>
             <p>{head.intro(t, d)}</p>
           </div>
+          <SimpleModeSwitch
+            on={simpleMode}
+            label={d.simple.label}
+            hint={d.simple.hint}
+            onChange={changeSimpleMode}
+          />
         </div>
 
-        <div key={page} className={supportsViewTransitions ? 'desktop-page' : 'desktop-page page-enter'}>
-          {page === 'paper' && (
-            <div className="task-page">
-              <TaskStrip
-                book={figureBook}
+        <div className="desktop-page">
+          {visited.has('paper') && (
+            <div className={paneClass('paper', page, supportsViewTransitions)}>
+              <div className="task-page">
+                <TaskStrip
+                  book={figureBook}
+                  d={d}
+                  formTitle={(form) => form.title}
+                  onSelect={(id) => setFigureBook((book) => selectTab(book, id))}
+                  onAdd={() => setFigureBook((book) => addTab(book, defaultFigureForm))}
+                  onClose={(id) => setFigureBook((book) => closeTab(book, id, defaultFigureForm))}
+                />
+                <FigureForm
+                  key={figureTab.id}
+                  simpleMode={simpleMode}
+                  state={figureTab.form}
+                  onState={(next) => setFigureBook((book) => patchTab(book, figureTab.id, (tab) => ({ form: next(tab.form) })))}
+                  job={figureTab.job}
+                  onJob={(job) => setFigureBook((book) => patchTab(book, figureTab.id, () => ({ job })))}
+                  onMessage={showMessage}
+                  onGoTemplates={() => void transitionToPage('templates')}
+                  onOpenWorkbench={(assetId) => void openWorkbench(assetId)}
+                  t={t}
+                  d={d}
+                />
+              </div>
+            </div>
+          )}
+          {visited.has('ppt') && (
+            <div className={paneClass('ppt', page, supportsViewTransitions)}>
+              <div className="task-page">
+                <TaskStrip
+                  book={slideBook}
+                  d={d}
+                  formTitle={(form) => form.material}
+                  onSelect={(id) => setSlideBook((book) => selectTab(book, id))}
+                  onAdd={() => setSlideBook((book) => addTab(book, defaultSlideForm))}
+                  onClose={(id) => setSlideBook((book) => closeTab(book, id, defaultSlideForm))}
+                />
+                <SlideForm
+                  key={slideTab.id}
+                  simpleMode={simpleMode}
+                  state={slideTab.form}
+                  onState={(next) => setSlideBook((book) => patchTab(book, slideTab.id, (tab) => ({ form: next(tab.form) })))}
+                  job={slideTab.job}
+                  onJob={(job) => setSlideBook((book) => patchTab(book, slideTab.id, () => ({ job })))}
+                  onMessage={showMessage}
+                  onGoTemplates={() => void transitionToPage('templates')}
+                  onOpenWorkbench={(assetId) => void openWorkbench(assetId)}
+                  t={t}
+                  d={d}
+                />
+              </div>
+            </div>
+          )}
+          {visited.has('templates') && (
+            <div className={paneClass('templates', page, supportsViewTransitions)}>
+              <TemplateLibrary t={d} onMessage={showMessage} />
+            </div>
+          )}
+          {visited.has('history') && (
+            <div className={paneClass('history', page, supportsViewTransitions)}>
+              <HistoryPage
                 d={d}
-                formTitle={(form) => form.title}
-                onSelect={(id) => setFigureBook((book) => selectTab(book, id))}
-                onAdd={() => setFigureBook((book) => addTab(book, defaultFigureForm))}
-                onClose={(id) => setFigureBook((book) => closeTab(book, id, defaultFigureForm))}
-              />
-              <FigureForm
-                key={figureTab.id}
-                state={figureTab.form}
-                onState={(next) => setFigureBook((book) => patchTab(book, figureTab.id, (tab) => ({ form: next(tab.form) })))}
-                job={figureTab.job}
-                onJob={(job) => setFigureBook((book) => patchTab(book, figureTab.id, () => ({ job })))}
-                onMessage={showMessage}
-                onGoTemplates={() => void transitionToPage('templates')}
+                onOpen={openJob}
+                onDelete={(job, refresh) => deleteSettled(job, refresh)}
+                onRerun={rerunJob}
                 onOpenWorkbench={(assetId) => void openWorkbench(assetId)}
-                t={t}
-                d={d}
               />
             </div>
           )}
-          {page === 'ppt' && (
-            <div className="task-page">
-              <TaskStrip
-                book={slideBook}
-                d={d}
-                formTitle={(form) => form.material}
-                onSelect={(id) => setSlideBook((book) => selectTab(book, id))}
-                onAdd={() => setSlideBook((book) => addTab(book, defaultSlideForm))}
-                onClose={(id) => setSlideBook((book) => closeTab(book, id, defaultSlideForm))}
-              />
-              <SlideForm
-                key={slideTab.id}
-                state={slideTab.form}
-                onState={(next) => setSlideBook((book) => patchTab(book, slideTab.id, (tab) => ({ form: next(tab.form) })))}
-                job={slideTab.job}
-                onJob={(job) => setSlideBook((book) => patchTab(book, slideTab.id, () => ({ job })))}
+          {visited.has('workbench') && (
+            <div className={paneClass('workbench', page, supportsViewTransitions)}>
+              <WorkbenchPage
+                lang={lang}
+                request={workbenchRequest}
+                onRequestHandled={handleWorkbenchRequest}
                 onMessage={showMessage}
-                onGoTemplates={() => void transitionToPage('templates')}
-                onOpenWorkbench={(assetId) => void openWorkbench(assetId)}
-                t={t}
-                d={d}
+                registerLeaveGuard={registerWorkbenchLeaveGuard}
               />
             </div>
           )}
-          {page === 'templates' && <TemplateLibrary t={d} onMessage={showMessage} />}
-          {page === 'history' && (
-            <HistoryPage
-              d={d}
-              onOpen={openJob}
-              onDelete={(job, refresh) => deleteSettled(job, refresh)}
-              onRerun={rerunJob}
-              onOpenWorkbench={(assetId) => void openWorkbench(assetId)}
-            />
+          {visited.has('settings') && (
+            <div className={paneClass('settings', page, supportsViewTransitions)}>
+              <SettingsPane>
+                <Settings
+                  config={config}
+                  onChange={setConfig}
+                  onSave={persistConfig}
+                  t={t}
+                  tail={
+                    <SettingsSection
+                      title={d.nav.workbench}
+                      summary={workbenchSummary.summary}
+                      badge={workbenchSummary.badge}
+                      badgeTone={workbenchSummary.badgeTone}
+                      open={workbenchOpen}
+                      onToggle={() => setWorkbenchOpen((value) => !value)}
+                    >
+                      <WorkbenchSettings lang={lang} onMessage={showMessage} embedded onSummary={setWorkbenchSummary} />
+                    </SettingsSection>
+                  }
+                />
+              </SettingsPane>
+            </div>
           )}
-          {page === 'workbench' && (
-            <WorkbenchPage
-              lang={lang}
-              request={workbenchRequest}
-              onRequestHandled={handleWorkbenchRequest}
-              onMessage={showMessage}
-              registerLeaveGuard={registerWorkbenchLeaveGuard}
-            />
-          )}
-          {page === 'settings' && (
-            <SettingsPane>
-              <Settings
-                config={config}
-                onChange={setConfig}
-                onSave={persistConfig}
-                t={t}
-                tail={
-                  <SettingsSection
-                    title={d.nav.workbench}
-                    summary={workbenchSummary.summary}
-                    badge={workbenchSummary.badge}
-                    badgeTone={workbenchSummary.badgeTone}
-                    open={workbenchOpen}
-                    onToggle={() => setWorkbenchOpen((value) => !value)}
-                  >
-                    <WorkbenchSettings lang={lang} onMessage={showMessage} embedded onSummary={setWorkbenchSummary} />
-                  </SettingsSection>
-                }
+          {visited.has('about') && (
+            <div className={paneClass('about', page, supportsViewTransitions)}>
+              <AboutPage
+                d={d}
+                version={packageMetadata.version}
+                autoCheck={autoUpdate}
+                update={update}
+                onAutoCheck={changeAutoUpdate}
+                onCheck={() => void runUpdateCheck()}
+                onOpen={(url) => void openUrl(url)}
               />
-            </SettingsPane>
-          )}
-          {page === 'about' && (
-            <AboutPage
-              d={d}
-              version={packageMetadata.version}
-              autoCheck={autoUpdate}
-              update={update}
-              onAutoCheck={changeAutoUpdate}
-              onCheck={() => void runUpdateCheck()}
-              onOpen={(url) => void openUrl(url)}
-            />
+            </div>
           )}
         </div>
       </main>
@@ -551,12 +611,16 @@ function useBookPolling<F>(
 
 // Restores a stored figure payload into a form. Unknown or missing fields
 // fall back to the given base so a partial payload still yields a valid form.
-function figureFormFrom(payload: unknown, base: FigureFormState): FigureFormState {
+// 约束里由字体/背景色选项生成的那两句还原回下拉与色块，不然重开历史任务时
+// 选项会显示成「默认字体」和空色块，而文本里却留着那两句话。
+export function figureFormFrom(payload: unknown, base: FigureFormState, t: DesktopCopy['style']): FigureFormState {
   if (!payload || typeof payload !== 'object') return base;
   const p = payload as Record<string, unknown>;
   const ids = Array.isArray(p.template_ids)
     ? (p.template_ids as unknown[]).filter((id): id is string => typeof id === 'string')
     : [];
+  const rules = typeof p.custom_prompt === 'string' ? p.custom_prompt : '';
+  const { custom, choice } = splitRules(rules, t);
   return {
     ...base,
     title: typeof p.figure_title === 'string' ? p.figure_title : base.title,
@@ -571,18 +635,22 @@ function figureFormFrom(payload: unknown, base: FigureFormState): FigureFormStat
       p.style_strength === 'high' || p.style_strength === 'medium' || p.style_strength === 'low'
         ? p.style_strength
         : base.styleStrength,
-    custom: typeof p.custom_prompt === 'string' ? p.custom_prompt : ''
+    custom,
+    style: choice
   };
 }
 
-function slideFormFrom(payload: unknown, base: SlideFormState): SlideFormState {
+export function slideFormFrom(payload: unknown, base: SlideFormState, t: DesktopCopy['style']): SlideFormState {
   if (!payload || typeof payload !== 'object') return base;
   const p = payload as Record<string, unknown>;
+  const rules = typeof p.custom_prompt === 'string' ? p.custom_prompt : '';
+  const { custom, choice } = splitRules(rules, t);
   return {
     ...base,
     material: typeof p.material_text === 'string' ? p.material_text : base.material,
     pages: typeof p.page_count === 'number' && p.page_count > 0 ? p.page_count : base.pages,
-    custom: typeof p.custom_prompt === 'string' ? p.custom_prompt : ''
+    custom,
+    style: choice
   };
 }
 
@@ -659,7 +727,7 @@ function fullSize(url: string): string {
   return cut === -1 ? url : url.slice(0, cut);
 }
 
-const HistoryCard = memo(function HistoryCard({
+export const HistoryCard = memo(function HistoryCard({
   job,
   d,
   filteredOut,
@@ -680,6 +748,10 @@ const HistoryCard = memo(function HistoryCard({
   onRerun: (job: JobRecord) => void;
   onOpenWorkbench: (assetId: string) => void;
 }) {
+  // 简单模式的预览是所选母版：母版被删或挪走时退回原来那个空图标，
+  // 而不是留一张碎图。
+  const [previewBroken, setPreviewBroken] = useState(false);
+  const preview = previewBroken ? null : job.thumbnail;
   const pill = (() => {
     switch (job.status) {
       case 'queued':
@@ -698,11 +770,22 @@ const HistoryCard = memo(function HistoryCard({
       <button
         type="button"
         className="hc-image"
-        onClick={() => (job.thumbnail ? onPreview(fullSize(job.thumbnail)) : onOpen(job))}
-        title={job.thumbnail ? d.history.zoom : job.title ?? job.message ?? job.id}
+        onClick={() => (preview ? onPreview(fullSize(preview)) : onOpen(job))}
+        title={
+          preview
+            ? job.simple
+              ? `${d.history.reference}\n${d.history.simpleHint}`
+              : d.history.zoom
+            : job.title ?? job.message ?? job.id
+        }
       >
-        {job.thumbnail ? (
-          <img src={job.thumbnail} alt="" loading="lazy" decoding="async" />
+        {preview ? (
+          <img
+            src={preview}
+            alt=""
+            decoding="async"
+            onError={() => setPreviewBroken(true)}
+          />
         ) : (
           <span className="hc-image-empty">
             {job.mode === 'ppt_slide' ? <IconSlide /> : <IconFigure />}
@@ -718,6 +801,11 @@ const HistoryCard = memo(function HistoryCard({
         >
           <span className="hc-title-row">
             <span className={`recent-pill recent-pill-${job.status}`}>{pill}</span>
+            {job.simple && (
+              <span className="recent-pill hc-simple" title={d.history.simpleHint}>
+                {d.history.simple}
+              </span>
+            )}
             {job.rating && (
               <span className={`recent-pill hc-rating hc-rating-${job.rating}`} title={d.history.ratingTitle}>
                 {d.history.rating[job.rating]}
@@ -793,7 +881,7 @@ function reconcile(previous: JobRecord[], next: JobRecord[]): JobRecord[] {
   return changed ? merged : previous;
 }
 
-function HistoryPage({
+export function HistoryPage({
   d,
   onOpen,
   onDelete,
@@ -810,6 +898,7 @@ function HistoryPage({
   const [rows, setRows] = useState<JobRecord[]>(() => historyCache.get(0) ?? []);
   const [modeFilter, setModeFilter] = useState<'all' | 'paper_figure' | 'ppt_slide'>('all');
   const [statusFilter, setStatusFilter] = useState<'all' | 'live' | 'succeeded' | 'failed'>('all');
+  const [simpleFilter, setSimpleFilter] = useState<'all' | 'normal' | 'simple'>('all');
   const [query, setQuery] = useState('');
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
@@ -888,6 +977,8 @@ function HistoryPage({
     if (statusFilter === 'live' && isJobSettled(job.status)) return false;
     if (statusFilter === 'succeeded' && job.status !== 'succeeded') return false;
     if (statusFilter === 'failed' && job.status !== 'failed') return false;
+    if (simpleFilter === 'normal' && job.simple) return false;
+    if (simpleFilter === 'simple' && !job.simple) return false;
     if (query.trim()) {
       const haystack = `${job.title ?? ''} ${job.message ?? ''}`.toLowerCase();
       if (!haystack.includes(query.trim().toLowerCase())) return false;
@@ -953,6 +1044,16 @@ function HistoryPage({
           modeFilter,
           (key) => setModeFilter(key as typeof modeFilter),
           d.history.filterMode
+        )}
+        {seg(
+          [
+            { key: 'all', label: d.history.all },
+            { key: 'normal', label: d.history.normal },
+            { key: 'simple', label: d.history.simple }
+          ],
+          simpleFilter,
+          (key) => setSimpleFilter(key as typeof simpleFilter),
+          d.history.filterSimple
         )}
         {seg(
           [

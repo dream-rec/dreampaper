@@ -19,9 +19,10 @@ pub struct ReleaseInfo {
 
 pub async fn check(current_version: &str, proxy_url: Option<&str>) -> AppResult<ReleaseInfo> {
     let mut builder = reqwest::Client::builder()
+        .no_proxy()
         .connect_timeout(Duration::from_secs(8))
         .timeout(Duration::from_secs(15));
-    if let Some(proxy) = proxy_url.map(str::trim).filter(|value| !value.is_empty()) {
+    if let Some(proxy) = crate::core::net::configured_proxy(proxy_url) {
         builder = builder.proxy(
             reqwest::Proxy::all(proxy)
                 .map_err(|error| AppError::new("invalid_proxy", error.to_string()))?,

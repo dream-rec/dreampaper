@@ -31,6 +31,8 @@ jobs:
             target: x86_64-apple-darwin
           - os: macos-14
             target: aarch64-apple-darwin
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -76,12 +78,19 @@ jobs:
           - os: windows-2022
             label: Windows (setup + portable ZIP)
             target: x86_64-pc-windows-msvc
+            bundles: nsis
           - os: macos-15-intel
             label: macOS Intel
             target: x86_64-apple-darwin
+            bundles: app
           - os: macos-14
             label: macOS Apple Silicon
             target: aarch64-apple-darwin
+            bundles: app
+          - os: ubuntu-24.04
+            label: Ubuntu 24.04 (.deb)
+            target: x86_64-unknown-linux-gnu
+            bundles: deb
     env:
       MACOSX_DEPLOYMENT_TARGET: '13.0'
       RUSTFLAGS: ${{ matrix.target == 'x86_64-pc-windows-msvc' && '-C target-feature=+crt-static' || '' }}
@@ -98,6 +107,11 @@ jobs:
         if: runner.os == 'Windows'
         with:
           arch: x64
+      - name: 安装 Linux 构建依赖
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev file
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
@@ -128,8 +142,8 @@ jobs:
       - name: 构建最终安装包
         env:
           APPLE_SIGNING_IDENTITY: ${{ runner.os == 'macOS' && '-' || '' }}
-        run: npx tauri build --ci --target ${{ matrix.target }} --bundles ${{ runner.os == 'macOS' && 'app' || 'nsis' }}
-      - name: 归集四类产物
+        run: npx tauri build --ci --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+      - name: 归集五类产物
         run: node scripts/bundle.mjs ${{ matrix.target }} ${{ steps.version.outputs.version }}
       - name: 最终产物真实下载与离线 OCR 门禁
         run: node scripts/probe.mjs ${{ matrix.target }} ${{ steps.version.outputs.version }}

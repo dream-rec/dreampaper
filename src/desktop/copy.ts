@@ -3,6 +3,7 @@ import type { Lang } from '../app';
 export const desktopCopy = {
   zh: {
     nav: { paper: '科研图', ppt: '幻灯片', templates: '模板库', history: '历史', workbench: '工作台', settings: '设置', about: '项目介绍' },
+    simple: { label: '简单模式', hint: '不调用制图模型，只输出最终制图提示词；对之后提交的任务生效' },
     workbenchIntro: '框选修补错字、恢复可编辑文本、按原图像素裁剪，并以无损 PNG 导出。',
     settingsIntro: '配置 Design / Implement / Search 模型，以及代理与并发。',
     theme: { light: '切换到浅色模式', dark: '切换到深色模式' },
@@ -30,7 +31,7 @@ export const desktopCopy = {
     recent: { title: '近期任务', empty: '还没有任务', failed: '失败', running: '进行中', done: '完成', untitled: '未命名任务', finishedAt: '完成于', delete: '删除', confirmDelete: '确认删除', deleteFailed: '删除任务失败', rerun: '重跑', rerunFailed: '重跑失败', rerunUnavailable: '该任务缺少原始输入，无法重跑' },
     history: {
       title: '历史记录',
-      intro: '全部任务的完整档案：分页浏览，按类型与状态筛选，按标题搜索。',
+      intro: '全部任务的完整档案：分页浏览，按类型、运行模式与状态筛选，按标题搜索。',
       all: '全部',
       filterMode: '按类型筛选',
       filterStatus: '按状态筛选',
@@ -46,7 +47,12 @@ export const desktopCopy = {
       zoom: '放大图片',
       closePreview: '关闭预览',
       ratingTitle: '用户评分',
-      rating: { good: '优', fair: '良', poor: '差' }
+      rating: { good: '优', fair: '良', poor: '差' },
+      simple: '简单模式',
+      normal: '普通模式',
+      simpleHint: '这次只产出制图提示词，没有成品图；预览显示的是所选母版。',
+      reference: '预览：所选母版',
+      filterSimple: '按运行模式筛选'
     },
     pane: {
       form: '参数',
@@ -131,6 +137,7 @@ export const desktopCopy = {
   },
   en: {
     nav: { paper: 'Figure', ppt: 'Slide', templates: 'Templates', history: 'History', workbench: 'Workbench', settings: 'Settings', about: 'About' },
+    simple: { label: 'Simple mode', hint: 'Skip the drawing model and output the final drawing prompt only; applies to jobs submitted from now on' },
     workbenchIntro: 'Repair text, crop at source pixels, and export a lossless PNG.',
     settingsIntro: 'Configure Design / Implement / Search models, proxy and concurrency.',
     theme: { light: 'Switch to light mode', dark: 'Switch to dark mode' },
@@ -158,7 +165,7 @@ export const desktopCopy = {
     recent: { title: 'Recent jobs', empty: 'No jobs yet', failed: 'failed', running: 'running', done: 'done', untitled: 'Untitled task', finishedAt: 'finished at', delete: 'Delete', confirmDelete: 'Confirm', deleteFailed: 'Failed to delete job', rerun: 'Rerun', rerunFailed: 'Rerun failed', rerunUnavailable: 'Original input missing, cannot rerun' },
     history: {
       title: 'History',
-      intro: 'The full archive of every job: paginated, filterable by kind and status, searchable by title.',
+      intro: 'The full archive of every job: paginated, filterable by kind, run mode and status, searchable by title.',
       all: 'All',
       filterMode: 'Filter by kind',
       filterStatus: 'Filter by status',
@@ -174,7 +181,12 @@ export const desktopCopy = {
       zoom: 'Zoom image',
       closePreview: 'Close preview',
       ratingTitle: 'Your rating',
-      rating: { good: 'Good', fair: 'Fair', poor: 'Poor' }
+      rating: { good: 'Good', fair: 'Fair', poor: 'Poor' },
+      simple: 'Simple',
+      normal: 'Standard',
+      simpleHint: 'This run only produced the drawing prompts — there is no finished image, so the preview shows the template you picked.',
+      reference: 'Preview: the template you picked',
+      filterSimple: 'Filter by run mode'
     },
     pane: {
       form: 'Parameters',

@@ -30,6 +30,13 @@ patch("src-tauri/Cargo.toml", /^(\[package\][\s\S]*?^version\s*=\s*)"[^"]*"/m);
 
 patch("package.json", topLevelVersion);
 
+// CI 用 `cargo test --locked` 跑主应用：Cargo.toml 的版本变了而 Cargo.lock 没跟着变，
+// `--locked` 会直接失败。只改主包条目，OCR 独立 crate 与 ORT 的版本不在这里动。
+patch(
+  "src-tauri/Cargo.lock",
+  /(\[\[package\]\]\nname = "dreampaper"\nversion = )"[^"]*"/
+);
+
 
 const lock = JSON.parse(readFileSync("package-lock.json", "utf8"));
 lock.version = version;

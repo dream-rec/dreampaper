@@ -270,7 +270,10 @@ mod tests {
     #[test]
     fn advisor_contract_names_the_three_suggestion_kinds() {
         for token in ["reusable_layout", "term_mapping", "failure_modes_to_avoid"] {
-            assert!(advisor().contains(token), "advisor contract missing {token}");
+            assert!(
+                advisor().contains(token),
+                "advisor contract missing {token}"
+            );
         }
     }
 

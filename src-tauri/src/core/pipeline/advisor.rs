@@ -12,6 +12,7 @@ use serde_json::Value;
 use crate::core::config::ModelProfile;
 use crate::core::memory::{candidates_text, Fingerprint, MemoryCase};
 use crate::core::net::parse_json_response;
+use crate::core::pipeline::cache::{AnswerCache, StepCache};
 use crate::core::pipeline::contract;
 use crate::core::pipeline::hook::{ContextHook, Section};
 use crate::core::pipeline::runner::{DesignCall, DesignStep};
@@ -90,6 +91,8 @@ pub struct AdvisorRun<'a> {
     pub profile: &'a ModelProfile,
     pub proxy_url: Option<&'a str>,
     pub design_log: DesignSink<'a>,
+    /// 有缓存时这次比对只买一次，重跑任务命中就回放。
+    pub cache: Option<&'a AnswerCache>,
 }
 
 impl AdvisorRun<'_> {
@@ -135,6 +138,7 @@ impl AdvisorRun<'_> {
                 step: STEP,
                 label: LABEL,
             }),
+            cache: self.cache.map(|cache| StepCache { cache, scope: STEP }),
         };
         let text = call.first().await.ok()?;
         let parsed = parse_json_response(&text).ok()?;

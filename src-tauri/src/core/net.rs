@@ -241,16 +241,24 @@ pub const USER_AGENT: &str = concat!(
 );
 
 fn client_builder(proxy_url: Option<&str>) -> AppResult<reqwest::ClientBuilder> {
+    // 代理只认设置里填的值：环境里的 HTTP_PROXY / HTTPS_PROXY / ALL_PROXY 一律不采用。
+    // 否则用户 shell 里的残留代理会让请求瞬间连到不存在的本地端口，报“隧道错误”。
     let mut builder = reqwest::Client::builder()
+        .no_proxy()
         .user_agent(USER_AGENT)
         .tcp_keepalive(Duration::from_secs(30))
         .pool_max_idle_per_host(0);
-    if let Some(proxy) = proxy_url.map(str::trim).filter(|value| !value.is_empty()) {
+    if let Some(proxy) = configured_proxy(proxy_url) {
         let proxy = reqwest::Proxy::all(proxy)
             .map_err(|error| model_error(format!("代理配置无效: {error}")))?;
         builder = builder.proxy(proxy);
     }
     Ok(builder)
+}
+
+/// 只有显式配置且非空白的值才算代理；其余一律直连。
+pub(crate) fn configured_proxy(proxy_url: Option<&str>) -> Option<&str> {
+    proxy_url.map(str::trim).filter(|value| !value.is_empty())
 }
 
 pub fn build_client(
@@ -326,6 +334,7 @@ pub async fn post_json_with_retries(
     let all_headers = merged_headers(profile, headers);
     let attempts = (profile.max_retries.max(0) as u32) + 1;
     let mut last_transport_error: Option<String> = None;
+    let mut timed_out = false;
 
     for attempt in 0..attempts {
         let started = std::time::Instant::now();
@@ -343,6 +352,7 @@ pub async fn post_json_with_retries(
             }
             Err(error) => {
                 let elapsed = started.elapsed().as_secs();
+                timed_out = error.is_timeout();
                 last_transport_error = Some(if error.is_timeout() {
                     format!(
                         "模型请求超时：{read_timeout} 秒内未收到完整响应（本次等待 {elapsed} 秒）。\
@@ -364,18 +374,15 @@ pub async fn post_json_with_retries(
 
     let message =
         last_transport_error.unwrap_or_else(|| "模型请求失败：未收到有效响应".to_string());
-    let suggestion = if proxy_url
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .is_some()
-    {
-        "请检查代理地址和代理服务，或清空代理后直连。".to_string()
-    } else {
-        format!(
-            "请检查 {} 的 Base URL、DNS 和网络连接。",
-            capitalize_role(&profile.role)
-        )
-    };
+    let suggestion = transport_suggestion(
+        &profile.role,
+        &profile.protocol,
+        timed_out,
+        proxy_url
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .is_some(),
+    );
     Err(model_profile_error(
         profile,
         url,
@@ -384,6 +391,25 @@ pub async fn post_json_with_retries(
         None,
         suggestion,
     ))
+}
+
+/// 超时的处理建议：grok_search 的往返天生要几十秒（上游模型要真跑 x_search /
+/// web_search），把它指到代理或 DNS 只会贴错方向。
+fn transport_suggestion(role: &str, protocol: &str, timed_out: bool, has_proxy: bool) -> String {
+    let role = capitalize_role(role);
+    if timed_out {
+        if protocol.trim().eq_ignore_ascii_case("grok_search") {
+            return format!(
+                "{role} 的 grok_search 由上游模型自行联网检索，实测一次往返约 45 秒：\
+                 请把超时提到 120 秒以上（设置 → Search → 超时）。"
+            );
+        }
+        return format!("请提高 {role} 的超时，或检查服务商状态。");
+    }
+    if has_proxy {
+        return "请检查代理地址和代理服务，或清空代理后直连。".to_string();
+    }
+    format!("请检查 {role} 的 Base URL、DNS 和网络连接。")
 }
 
 pub struct SseOutcome {

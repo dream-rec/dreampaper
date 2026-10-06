@@ -75,6 +75,33 @@ export function composeRules(custom: string, choice: StyleChoice, t: StyleCopy):
   return parts.length > 0 ? parts.join('\n') : null;
 }
 
+/**
+ * `composeRules` 的逆：把存下来的约束文本拆回「自由文本 + 结构化选项」。
+ *
+ * 只认模板原样生成的句子，认不出的行原封不动留在自由文本里；同一个字体/颜色
+ * 重复出现时一并收走（旧记录里可能叠了两遍），另一套字体/颜色的句子则当用户
+ * 自己写的约束留下。
+ */
+export function splitRules(rules: string, t: StyleCopy): { custom: string; choice: StyleChoice } {
+  const choice: StyleChoice = { ...defaultStyleChoice };
+  const keep: string[] = [];
+  for (const line of rules.split('\n')) {
+    const sentence = line.trim();
+    const font = FONT_CHOICES.find((candidate) => sentence === t.fontLine(candidate));
+    if (font && (!choice.font || choice.font === font)) {
+      choice.font = font;
+      continue;
+    }
+    const hex = normalizeHex(sentence.match(/#[0-9a-fA-F]{3,6}/)?.[0] ?? '');
+    if (hex && sentence === t.backgroundLine(hex) && (!choice.background || choice.background === hex)) {
+      choice.background = hex;
+      continue;
+    }
+    keep.push(line);
+  }
+  return { custom: keep.join('\n').trim(), choice };
+}
+
 interface EyeDropperLike {
   open: () => Promise<{ sRGBHex: string }>;
 }

@@ -91,7 +91,12 @@ impl Fingerprint {
         let (title, brief) = match mode.as_str() {
             "ppt_slide" => {
                 let material = field("material_text");
-                let title = material.lines().next().unwrap_or_default().trim().to_string();
+                let title = material
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
                 (title, material)
             }
             _ => (field("figure_title"), field("section_description")),
@@ -193,7 +198,10 @@ impl<'a> MemoryService<'a> {
             "DELETE FROM memory_fts WHERE rowid IN (SELECT rowid FROM memory_cases WHERE job_id = ?1)",
             params![job_id],
         )?;
-        tx.execute("DELETE FROM memory_cases WHERE job_id = ?1", params![job_id])?;
+        tx.execute(
+            "DELETE FROM memory_cases WHERE job_id = ?1",
+            params![job_id],
+        )?;
         tx.execute(
             "INSERT INTO memory_cases(job_id, mode, title, brief, design_json, rating, created_at) \
              VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6)",
@@ -234,7 +242,12 @@ impl<'a> MemoryService<'a> {
              ORDER BY score LIMIT ?4",
         )?;
         let rows = stmt.query_map(
-            params![query, fingerprint.mode, exclude.unwrap_or(""), limit.max(1) as i64],
+            params![
+                query,
+                fingerprint.mode,
+                exclude.unwrap_or(""),
+                limit.max(1) as i64
+            ],
             |row| {
                 Ok(MemoryCase {
                     job_id: row.get(0)?,
@@ -297,7 +310,10 @@ impl<'a> MemoryService<'a> {
             "DELETE FROM memory_fts WHERE rowid IN (SELECT rowid FROM memory_cases WHERE job_id = ?1)",
             params![job_id],
         )?;
-        conn.execute("DELETE FROM memory_cases WHERE job_id = ?1", params![job_id])?;
+        conn.execute(
+            "DELETE FROM memory_cases WHERE job_id = ?1",
+            params![job_id],
+        )?;
         Ok(())
     }
 }
@@ -382,7 +398,9 @@ mod tests {
         assert_eq!(slide.title, "第一行");
         assert_eq!(slide.brief, "第一行\n更多资料");
 
-        assert!(Fingerprint::from_payload(&json!({"mode": "paper_figure", "payload": {}})).is_none());
+        assert!(
+            Fingerprint::from_payload(&json!({"mode": "paper_figure", "payload": {}})).is_none()
+        );
     }
 
     #[test]
@@ -392,7 +410,10 @@ mod tests {
         memory
             .record(
                 "j1",
-                &figure("多模态文档检索流程", "OCR 版面分析 双塔编码 BM25 交叉编码器 重排"),
+                &figure(
+                    "多模态文档检索流程",
+                    "OCR 版面分析 双塔编码 BM25 交叉编码器 重排",
+                ),
                 &json!({"figure": {"title": "a"}}),
             )
             .unwrap();
@@ -420,13 +441,19 @@ mod tests {
         // tokenizer would have found nothing here.
         let hits = memory
             .recall(
-                &figure("跨模态检索系统", "先做 OCR，再用 BM25 和双塔做检索，最后交叉编码器重排"),
+                &figure(
+                    "跨模态检索系统",
+                    "先做 OCR，再用 BM25 和双塔做检索，最后交叉编码器重排",
+                ),
                 None,
                 RECALL_LIMIT,
             )
             .unwrap();
         assert_eq!(hits[0].job_id, "j1", "最相近的案例应排第一");
-        assert!(hits.iter().all(|hit| hit.mode == "paper_figure"), "mode 必须硬过滤");
+        assert!(
+            hits.iter().all(|hit| hit.mode == "paper_figure"),
+            "mode 必须硬过滤"
+        );
         assert!(hits.iter().all(|hit| hit.job_id != "s1"));
 
         // A rerun must not be advised by its own earlier case.
@@ -473,7 +500,10 @@ mod tests {
 
         memory.forget("j1").unwrap();
         assert!(!memory.has_case("j1").unwrap());
-        assert!(memory.recall(&figure("标题", "内容"), None, 5).unwrap().is_empty());
+        assert!(memory
+            .recall(&figure("标题", "内容"), None, 5)
+            .unwrap()
+            .is_empty());
         let _ = std::fs::remove_dir_all(dir);
     }
 

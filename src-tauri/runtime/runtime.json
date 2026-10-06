@@ -1,6 +1,6 @@
 {
   "version": "1.29.0",
   "commit": "2e2543fbe9fae542f921d47a72d21d5a4ef0b710",
-  "build": "scripts/ort.mjs：对应平台原生构建 CPU-only shared Release，关闭遥测；macOS 部署目标 13.0，Windows 静态链接 MSVC 运行时",
+  "build": "scripts/ort.mjs：对应平台原生构建 CPU-only shared Release，关闭遥测；macOS 部署目标 13.0，Windows 静态链接 MSVC 运行时，Linux 校验 ELF 架构、RPATH 与动态依赖",
   "verification": "每次构建生成独立 manifest.json，记录源码、配方 SHA-256、目标、工具链和逐文件大小与摘要；同次 CI artifact 交付打包步骤，禁止空摘要或缺失引擎"
 }

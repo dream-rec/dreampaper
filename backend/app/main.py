@@ -8,7 +8,7 @@ from fastapi.responses import FileResponse
 
 from .adapters import normalize_base_url
 from .assets import AssetStore
-from .config import ConfigStore
+from .config import ConfigStore, search_needs_key
 from .jobs import JobManager
 from .models import AppConfig, JobCreateRequest, TestModelRequest
 from .prompts import PromptStore
@@ -55,7 +55,8 @@ def save_model_config(config: AppConfig):
 def test_model_config(request: TestModelRequest) -> dict[str, str]:
     profile = request.profile
     normalized = normalize_base_url(profile.base_url, profile.protocol)
-    if not profile.api_key:
+    # 免密钥的搜索协议（duckduckgo）不看密钥，只报地址。
+    if not profile.api_key and search_needs_key(profile.protocol):
         return {"status": "missing_api_key", "base_url": normalized}
     return {"status": "configured", "base_url": normalized}
 

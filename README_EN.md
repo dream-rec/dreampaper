@@ -28,7 +28,7 @@
 - **Bring your own models** — separate Design / Implement / Search profiles (OpenAI, Anthropic, image2, banana2, …)
 - **Stage hooks** — event hooks stream the design log; context hooks inject contracts, inventories and evidence into each stage prompt as pluggable sections
 - **Case memory + advisor** — design products are kept as cases, recalled by CJK-bigram FTS5 similarity, and an advisor role compares them into layout advice; rate a task good / fair / poor to steer later recalls
-- **Slide visual grounding** — detect products and instruments in material, search appearance cues, draw real objects instead of labeled boxes
+- **Visual grounding** — figure and slide jobs alike detect products and instruments in the input, search appearance cues, and push the drawing model toward real objects instead of labeled boxes (no master screenshot ever goes into a search request); the step is skipped when no search model is configured
 - **Fully local** — config and outputs under `~/.dreampaper/`; keys never enter the repo
 
 ---
@@ -91,6 +91,7 @@ Prefer not to set up Python? Grab the [latest release](../../releases/latest). T
 | `dreampaper-*-portable.zip` | Windows portable (extract the complete directory; do not move the EXE alone) |
 | `dreampaper-*-x64-mac.dmg` | macOS Intel |
 | `dreampaper-*-arm64-mac.dmg` | macOS Apple Silicon |
+| `dreampaper-*-amd64.deb` | Ubuntu 24.04 x86-64 (Debian family) |
 
 ### First launch
 
@@ -99,18 +100,23 @@ There is no commercial signing certificate: Windows executables are unsigned; ma
 - **macOS**: double-clicking reports an unverified developer. Right-click the app → Open → Open again. One time only.
 - **Windows**: SmartScreen shows "Windows protected your PC". Click "More info" → "Run anyway".
 - The **Windows portable** build requires [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/). Install it if missing, or use the installer. Keep the main EXE, OCR sidecar, `ort/`, fonts and other files together.
+- **Linux**: `sudo apt install ./dreampaper-*-amd64.deb`. The package declares its `libwebkit2gtk-4.1-0`, `libgtk-3-0` and `libgomp1` dependencies for apt to resolve. The build baseline is Ubuntu 24.04 x86-64; older distributions are untested, and no RPM or AppImage is published.
 
-All four artifacts include the OCR engine, but not the models. Download the approximately 133 MiB model package in Settings once; detection/recognition files fall back between PaddlePaddle's official ModelScope and Hugging Face mirrors, with pinned file sizes and SHA-256 verification. Recognition then works offline without Python or a separate ONNX Runtime installation. Release CI validates actual installed/extracted packages and creates only a draft after all four pass.
+All five artifacts include the OCR engine, but not the models. Download the approximately 133 MiB model package in Settings once; detection/recognition files fall back between PaddlePaddle's official ModelScope and Hugging Face mirrors, with pinned file sizes and SHA-256 verification. Recognition then works offline without Python or a separate ONNX Runtime installation. Release CI validates actual installed/extracted packages and creates only a draft after all five pass.
 
 ### Desktop builds
 
-Build on the target platform with Node.js 22, Rust and Visual Studio 2022 C++ (Windows) or Xcode (macOS). Install Python 3.12, `cmake==4.1.2` and `ninja==1.13.0` for the ORT build only; these tools are not shipped. Run `npm ci`, `npm run gate:ort`, `npm run sidecar`, then the Rust tests and `npm run tauri:build`. The engine must be staged before Tauri tests compile.
+Build on the target platform with Node.js 22, Rust and the platform toolchain (Visual Studio 2022 C++ on Windows, Xcode on macOS, the Tauri dependencies such as `libwebkit2gtk-4.1-dev` and `libgtk-3-dev` on Linux). Install Python 3.12, `cmake==4.1.2` and `ninja==1.13.0` for the ORT build only; these tools are not shipped. Run `npm ci`, `npm run gate:ort`, `npm run sidecar`, then the Rust tests and `npm run tauri:build`. The engine must be staged before Tauri tests compile.
+
+For local desktop debugging use `npm run tauri:dev`: it stages a debug build of the OCR sidecar into `src-tauri/binaries/` and makes sure the `runtime/ort` resource directory exists, since Tauri's build script requires both `externalBin` and the resource path. Without a previous `gate:ort` there is no ONNX Runtime on disk, so OCR is unavailable while everything else works; run `gate:ort` and `sidecar` above when you need the real engine.
 
 CI builds CPU ORT from a pinned commit on each platform and verifies its per-build file manifest before packaging. Missing engines cannot be bypassed. Manual workflow runs upload artifacts only; tag runs create a draft after all gates pass. Runtime manifests and OCR reports are available as Actions artifacts.
 
 The final DMG is assembled by `scripts/bundle.mjs`, which grants the ad-hoc library-loading exception only to the OCR sidecar and re-signs the outer app. The main executable retains Hardened Runtime; do not distribute the intermediate Tauri app instead.
 
 The macOS deployment target is 13.0. Passing on modern CI runners does not establish minimum-version compatibility; macOS 13.0 and the minimum Windows version require separate installed-package testing.
+
+On Linux, ORT is built natively from the pinned commit and checked for target architecture, leftover build-machine paths and dynamic dependencies. The `.deb` is produced by Tauri; the runtime dependencies live in `src-tauri/tauri.linux.conf.json`, and the release gate checks the built package's control fields against that list (it does not assume whether upstream derives defaults). Linux gates run with `LD_LIBRARY_PATH`, `LD_PRELOAD` and `LD_AUDIT` cleared; the build baseline is Ubuntu 24.04 x86-64.
 
 ### Workbench (desktop)
 
@@ -126,6 +132,7 @@ The desktop build stores config and outputs in the OS app-data directory rather 
 | --- | --- |
 | macOS | `~/Library/Application Support/com.dreampaper.app/` |
 | Windows | `%APPDATA%\com.dreampaper.app\` |
+| Linux | `~/.local/share/com.dreampaper.app/` (follows `XDG_DATA_HOME`) |
 
 ---
 
@@ -198,11 +205,19 @@ Three roles are configured separately, each with its own protocol / URL / model 
 | design | `anthropic_messages` | `{URL}/v1/messages` | `https://api.anthropic.com` |
 | implement | `image2` (default) | `{URL}/v1/images/generations`, or `/v1/images/edits` when reference images are attached | `https://api.openai.com` + `gpt-image-2` |
 | implement | `banana2` | `{URL}/{version}/interactions` | gemini-protocol gateway + `nano-banana-2` |
-| search | `duckduckgo_html` (default) | DuckDuckGo HTML | no key needed; the key field is disabled |
+| search | `duckduckgo` (default) | DuckDuckGo no-JS page | no key and no URL (both fields are hidden); the endpoint is fixed in code |
 | search | `tavily` | `{URL}/search` | `https://api.tavily.com`, API key required |
-| search | `openai_chat (search model)` | `{URL}/chat/completions` | `https://api.x.ai/v1` + `grok-3` |
+| search | `grok_search` | `{URL}/v1/chat/completions` | OpenAI-compatible gateway (e.g. grok2api) + a model ID that carries search itself (`grok-build-0.1`) |
 
 > The URL only needs the host; `/v1` is appended automatically when missing. `banana2` is the exception — its version comes from the Version field (default `v1beta`).
+
+Search settings are stored **per protocol**: `duckduckgo`, `tavily` and `grok_search` each keep their own URL, model and key. Switching the protocol in the settings selects that profile — it neither carries the previous protocol's values over nor loses what you already filled in, keys included. The form only shows the fields a protocol actually reads: `duckduckgo` needs nothing at all (its endpoint is fixed and it takes no key, so neither field is shown), `tavily` never reads a model so that field is hidden, and only `grok_search` shows all three. Upgrading from an older build repairs the leftovers: a profile that still carries another protocol's endpoint and model (older builds had a single search profile, so switching protocols left the values behind) moves over to `grok_search` in full, and the protocol it came from gets a fresh default profile — nothing has to be retyped.
+
+`duckduckgo` is the keyless protocol: it reads DuckDuckGo's no-JS page. That page is touchy about automation — sending only a `User-Agent` gets flagged and answers HTTP 202 with an anti-bot page that contains no results at all; it needs the browser-only `Sec-Fetch-*` and `Upgrade-Insecure-Requests` headers, and a busy exit IP gets throttled anyway. So a challenge is never disguised as "no sources": it fails the job with a message naming `tavily` and `grok_search` as the alternatives, and for regular use those two (real APIs) are the ones to pick.
+
+A failed search — wrong route, rejected key, rate limit, anti-bot page — is treated the same way for **every** protocol: the job fails with the reason, instead of silently degrading to "this subject has no sources". Otherwise the infrastructure problem is invisible and the figure gets drawn with no grounding at all. A search that genuinely returns zero results still degrades as before (the prompt has a dedicated branch for it). Any failed job can be retried: failed searches are re-sent, while the steps that already finished replay from the cache.
+
+`grok_search` is exactly "an OpenAI-compatible chat completions endpoint whose upstream model runs the search tools itself" — [grok2api](https://github.com/chenyme/grok2api) is one such gateway. The model is the deployment's own model ID (for example `grok-build-0.1`, which carries the search tools); no prefix is required and whether it can search is the server's answer. Requests are always non-streaming and set `tool_choice: required`, i.e. the request asks for at least one tool call. The request always declares both `x_search` and `web_search`: whichever is missing is appended, entries already configured are kept, nothing is duplicated. Every call's query and the results it received are recorded on the job and shown in the result card's "Generation steps" list, one collapsible row per round in execution order (a "Query" block and a "Query results" block); failed calls are recorded too. When a model cannot use those tools, the deployment sometimes answers HTTP 400 `A tool_choice was set on the request but no tools were specified` — which is exactly why the client cannot assert what ran, and why any failed request (route, auth or HTTP error) fails the job instead of degrading into a normal-looking "no sources" result.
 
 ### Image parameter dropdowns
 
@@ -233,7 +248,7 @@ Three roles are configured separately, each with its own protocol / URL / model 
 | Retries | all | 0–8 | design 2 / implement 3 / search 1 |
 | Stream | design | on / off | off |
 | Results | search | 1–8 | 3 |
-| Proxy | global | URL or port | `http://127.0.0.1:7890`; empty means no explicit proxy |
+| Proxy | global | URL or port | `http://127.0.0.1:7890`; empty means no explicit proxy (the `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` shell variables are never adopted automatically — only this field counts) |
 | Plan workers | global (slides) | 1–20 | empty = follow page count |
 | Image workers | global (slides) | 1–20 | empty = follow page count; start at 1 to reduce gateway 502s |
 
@@ -244,6 +259,8 @@ Three roles are configured separately, each with its own protocol / URL / model 
 1. **Settings** — configure Design / Implement (optional Search, proxy, concurrency), save  
 2. **Figure** — pick templates → title + method → generate  
 3. **Slide** — upload master → material + page count → generate  
+
+The **Simple Mode** switch in the top bar runs the prompt pipeline only: it still needs the design model (and optionally search), never calls the drawing model, and requires no implement credentials. While it is on, the result card's generation list gains a **Final drawing prompt** row — the exact prompt the drawing model would have received, one for a figure and one per slide page in page order, with line breaks preserved and one-click copy. It is off by default, applies to both figure and slide jobs, and travels as a per-job snapshot: re-running history uses the current switch, while a job already running is unaffected. Simple-mode jobs therefore never have a finished image to show, so their history card previews the template that run used (click to zoom; the tooltip says "Preview: the template you picked") and carries a green **Simple** pill next to the title. The history filter bar also filters by run mode (all / standard / simple) alongside kind and status. If that template was deleted the card falls back to the plain icon instead of a broken image; a normal-mode job with no image simply did not finish, and never borrows the template as a stand-in.
 
 | Path | Content |
 | --- | --- |

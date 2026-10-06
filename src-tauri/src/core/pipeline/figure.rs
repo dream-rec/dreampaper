@@ -7,12 +7,17 @@ use crate::core::memory::{Fingerprint, MemoryCase};
 use crate::core::model::design::ImageInput;
 use crate::core::model::implement::ImplementClient;
 use crate::core::pipeline::advisor::{AdvisorHook, AdvisorRun};
+use crate::core::pipeline::cache::{cached_image, profile_identity, AnswerCache, StepCache};
 use crate::core::pipeline::hook::{injected_summary, ContextHooks, Section, StaticContext};
 use crate::core::pipeline::runner::{parse_validate_or_fill, DesignCall, DesignStep};
+use crate::core::pipeline::visual::{
+    build_visual_asset_context, pick_visual_subjects, visual_asset_context_text,
+    visual_asset_log_text,
+};
 use crate::core::pipeline::{contract, validate};
 use crate::core::prompt::PromptStore;
 use crate::error::{AppError, AppResult};
-use crate::event::DesignSink;
+use crate::event::{DesignLog, DesignSink};
 
 /// Stage keys the context hooks are registered against.
 pub const STAGE_STRUCTURE: &str = "paper_structure";
@@ -48,6 +53,18 @@ fn default_strength() -> String {
 
 pub type StageSink<'a> = &'a (dyn Fn(&str, &str) + Send + Sync);
 
+/// 检索只吃标题与方法描述：约束（字体、底色一类）不是可检索的视觉主体。
+fn figure_search_material(payload: &PaperFigurePayload) -> String {
+    [
+        payload.figure_title.trim(),
+        payload.section_description.trim(),
+    ]
+    .into_iter()
+    .filter(|part| !part.is_empty())
+    .collect::<Vec<_>>()
+    .join("\n")
+}
+
 pub fn validate_payload(payload: &PaperFigurePayload) -> AppResult<()> {
     if payload.template_ids.is_empty() {
         return Err(AppError::new(
@@ -62,7 +79,10 @@ pub struct FigureRun<'a> {
     pub prompts: &'a PromptStore,
     pub config: &'a AppConfig,
     pub design_profile: &'a ModelProfile,
-    pub implement_profile: &'a ModelProfile,
+    pub implement_profile: Option<&'a ModelProfile>,
+    /// Search runs only when a search profile is configured: a figure job that
+    /// never had one must keep working instead of failing on a missing profile.
+    pub search_profile: Option<&'a ModelProfile>,
     pub template_images: Vec<ImageInput>,
     pub template_metadata: Value,
     pub app_data: &'a Path,
@@ -71,12 +91,15 @@ pub struct FigureRun<'a> {
     /// Recalled cases for the advisor step; empty means the step is skipped.
     pub similar_cases: Vec<MemoryCase>,
     pub fingerprint: Option<Fingerprint>,
+    /// 失败或停止后重跑这个任务时的答案缓存；没有就每次都真的调用。
+    pub cache: Option<&'a AnswerCache>,
 }
 
 /// What a figure run hands back: the image and the design product that the
 /// memory keeps as the job's case.
 pub struct FigureOutput {
-    pub image_b64: String,
+    pub image_b64: Option<String>,
+    pub final_prompts: Vec<String>,
     pub design: Value,
 }
 
@@ -199,7 +222,50 @@ impl FigureRun<'_> {
             .contract(),
         );
 
-        stage("paper_structure_prompt", "拼接 template 结构分析 prompt");
+        // 视觉素材检索与幻灯片同源：先联网拿到产品/工具的客观外观描述，再作为
+        // 纯文本线索注入制图方案；图片只进结构分析那一个调用。
+        match self.search_profile {
+            Some(search_profile) => {
+                stage("paper_visual_assets", "联网查询产品与工具的视觉素材");
+                let subjects = pick_visual_subjects(
+                    &figure_search_material(payload),
+                    self.design_profile,
+                    self.prompts,
+                    proxy,
+                    self.cache,
+                )
+                .await;
+                let visual_context = build_visual_asset_context(
+                    &subjects,
+                    search_profile,
+                    proxy,
+                    self.design_log,
+                    self.cache,
+                )
+                .await?;
+                (self.design_log)(DesignLog::End {
+                    step: "paper_visual_assets",
+                    label: "联网查询 · 视觉证据",
+                    text: &visual_asset_log_text(&visual_context),
+                    ok: true,
+                });
+                hooks.register(
+                    StaticContext::new(
+                        "search-evidence",
+                        &[STAGE_DESIGN],
+                        "Visual Asset Search Context",
+                        visual_asset_context_text(&visual_context),
+                    )
+                    .at(5),
+                );
+            }
+            None => stage(
+                "paper_visual_assets",
+                "未配置联网查询模型，跳过视觉素材检索",
+            ),
+        }
+
+        stage("paper_structure_prompt", "准备母版结构分析");
         let structure_assets = self.prompts.load_all(&[
             "global/system.md",
             "global/figure_style.md",
@@ -227,7 +293,7 @@ impl FigureRun<'_> {
             if save_design_diagnostic(structure_app_data, structure_job_id, &name, text).is_ok() {
                 stage(
                     "paper_structure_parse",
-                    &format!("校验未通过,自动重新请求 design model(第 {count} 次)"),
+                    &format!("结果校验未通过，自动重新生成（第 {count} 次）"),
                 );
             }
         };
@@ -241,11 +307,15 @@ impl FigureRun<'_> {
             log: Some(DesignStep {
                 sink: self.design_log,
                 step: "paper_structure",
-                label: "分析 template 结构",
+                label: "分析母版结构",
+            }),
+            cache: self.cache.map(|cache| StepCache {
+                cache,
+                scope: STAGE_STRUCTURE,
             }),
         };
 
-        stage("paper_structure", "调用 design model 分析 template 结构");
+        stage("paper_structure", "分析母版结构");
         let structure_text = structure_call.first().await?;
         save_design_diagnostic(
             self.app_data,
@@ -254,7 +324,7 @@ impl FigureRun<'_> {
             &structure_text,
         )?;
 
-        stage("paper_structure_parse", "解析并校验结构规划 JSON");
+        stage("paper_structure_parse", "校验结构规划");
         let structure = parse_validate_or_fill(&structure_call, &structure_text, |value| {
             validate::validate_structure_plan(value)
         })
@@ -278,17 +348,18 @@ impl FigureRun<'_> {
         {
             stage(
                 "paper_advisor",
-                &format!("advisor 比对 {} 个相似历史案例", self.similar_cases.len()),
+                &format!("对比 {} 个相似历史案例", self.similar_cases.len()),
             );
             let advisor = AdvisorRun {
                 prompts: self.prompts,
                 profile: self.design_profile,
                 proxy_url: proxy,
                 design_log: self.design_log,
+                cache: self.cache,
             };
             match advisor.advise(fingerprint, &self.similar_cases).await {
                 Some(advice) => hooks.register(AdvisorHook::new(&[STAGE_DESIGN], advice)),
-                None => stage("paper_advisor", "advisor 未给出可用建议，按无历史案例继续"),
+                None => stage("paper_advisor", "没有可用的历史建议，按新任务继续"),
             }
         }
 
@@ -305,7 +376,7 @@ impl FigureRun<'_> {
         stage(
             "paper_prompt",
             &format!(
-                "拼接内容填充 prompt（注入 {}）",
+                "准备内容填充（注入 {}）",
                 injected_summary(&design_composed)
             ),
         );
@@ -322,7 +393,7 @@ impl FigureRun<'_> {
             if save_design_diagnostic(app_data, job_id, &name, text).is_ok() {
                 stage(
                     "paper_parse",
-                    &format!("校验未通过,自动重新请求 design model(第 {count} 次)"),
+                    &format!("结果校验未通过，自动重新生成（第 {count} 次）"),
                 );
             }
         };
@@ -338,9 +409,13 @@ impl FigureRun<'_> {
                 step: "paper_design",
                 label: "映射内容并生成制图方案",
             }),
+            cache: self.cache.map(|cache| StepCache {
+                cache,
+                scope: STAGE_DESIGN,
+            }),
         };
 
-        stage("paper_design", "调用 design model 映射内容并生成制图方案");
+        stage("paper_design", "生成制图方案");
         let design_text = design_call.first().await?;
         let diagnostic_path = save_design_diagnostic(
             self.app_data,
@@ -349,7 +424,7 @@ impl FigureRun<'_> {
             &design_text,
         )?;
 
-        stage("paper_parse", "解析并校验 design JSON");
+        stage("paper_parse", "校验制图方案");
         let title = payload.figure_title.trim().to_string();
         let section = payload.section_description.trim().to_string();
         let design_result = parse_validate_or_fill(&design_call, &design_text, move |value| {
@@ -381,23 +456,69 @@ impl FigureRun<'_> {
         let implement_prompt =
             validate::implement_prompt(&design.parsed).map_err(AppError::from)?;
 
-        stage("paper_implement", "调用 implement model 生成图片");
-        let image_b64 = ImplementClient::generate(
-            self.implement_profile,
-            &implement_prompt,
-            &[],
-            &Map::new(),
-            proxy,
-        )
-        .await?;
-
-        stage("paper_save", "保存生成图片");
+        let image_b64 = if let Some(profile) = self.implement_profile {
+            stage("paper_implement", "生成图片");
+            let overrides = Map::new();
+            let identity = profile_identity(profile);
+            let overrides_json = serde_json::to_string(&overrides).unwrap_or_default();
+            let image = cached_image(
+                self.cache.map(|cache| StepCache {
+                    cache,
+                    scope: "paper_implement",
+                }),
+                &[
+                    identity.as_bytes(),
+                    implement_prompt.as_bytes(),
+                    overrides_json.as_bytes(),
+                ],
+                || ImplementClient::generate(profile, &implement_prompt, &[], &overrides, proxy),
+            )
+            .await?;
+            stage("paper_save", "保存图片");
+            Some(image)
+        } else {
+            None
+        };
         Ok(FigureOutput {
             image_b64,
+            final_prompts: vec![implement_prompt],
             design: serde_json::json!({
                 "structure_plan": structure.value,
                 "design": design.parsed,
             }),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn payload(title: &str, section: &str, custom: Option<&str>) -> PaperFigurePayload {
+        PaperFigurePayload {
+            figure_title: title.to_string(),
+            section_description: section.to_string(),
+            template_ids: vec!["t1".to_string()],
+            aspect_ratio: default_ratio(),
+            layout_fidelity: default_fidelity(),
+            style_strength: default_strength(),
+            custom_prompt: custom.map(str::to_string),
+        }
+    }
+
+    /// 约束只影响版式与配色，不进检索输入。
+    #[test]
+    fn search_material_excludes_constraints() {
+        let figure = payload(
+            "  部署拓扑  ",
+            "  用 Docker 构建  ",
+            Some("  标题用微软雅黑，底色 #FFFFFF  "),
+        );
+        assert_eq!(figure_search_material(&figure), "部署拓扑\n用 Docker 构建");
+        assert_eq!(figure_search_material(&payload("标题", "", None)), "标题");
+        assert_eq!(
+            figure_search_material(&payload("", "", Some("白色背景"))),
+            ""
+        );
     }
 }

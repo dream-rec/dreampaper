@@ -228,10 +228,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
 ///
 /// Append only; never edit a shipped step. Each step must be safe to run on
 /// a database that already has every earlier step applied.
-const MIGRATIONS: &[(i64, &str)] = &[
-    (2, MIGRATION_V2_WORKBENCH),
-    (3, MIGRATION_V3_MEMORY),
-];
+const MIGRATIONS: &[(i64, &str)] = &[(2, MIGRATION_V2_WORKBENCH), (3, MIGRATION_V3_MEMORY)];
 
 /// v2: the image workbench. Source snapshots are immutable and deduplicated by
 /// content digest; projects reference them by id, and the JSON document on

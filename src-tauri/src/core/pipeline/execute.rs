@@ -11,6 +11,7 @@ use crate::core::job::{JobImage, JobService};
 use crate::core::memory::{Fingerprint, MemoryService, RECALL_LIMIT};
 use crate::core::model::design::ImageInput;
 use crate::core::net::{decode_b64, encode_b64};
+use crate::core::pipeline::cache::AnswerCache;
 use crate::core::pipeline::figure::{self, FigureRun, PaperFigurePayload};
 use crate::core::pipeline::slide::{
     compose_material_context, validate_payload, MaterialAsset, PptSlidePayload, SlideRun,
@@ -153,7 +154,8 @@ pub fn spawn(app: AppHandle, core: Arc<Core>, job_id: String) {
                     // memory failure is not a job failure: the image exists.
                     if let Some((fingerprint, design)) = case {
                         sink("memory_record", "沉淀 design 产物到案例库");
-                        let _ = MemoryService::new(&core.store).record(&job_id, &fingerprint, &design);
+                        let _ =
+                            MemoryService::new(&core.store).record(&job_id, &fingerprint, &design);
                     }
                     let _ = JobService::new(&core.store).finish(&job_id, &images);
                     emit("completed", "任务完成", "succeeded");
@@ -201,9 +203,9 @@ fn recall_cases(
         .recall(fingerprint, Some(job_id), RECALL_LIMIT)
         .unwrap_or_default();
     if cases.is_empty() {
-        stage(stage_key, "案例库中没有相似历史任务，跳过 advisor");
+        stage(stage_key, "案例库里没有相似历史任务，跳过参考");
     } else {
-        stage(stage_key, &format!("召回 {} 个相似历史案例", cases.len()));
+        stage(stage_key, &format!("参考 {} 个相似历史案例", cases.len()));
     }
     cases
 }
@@ -228,15 +230,24 @@ async fn run(
 
     let config = ConfigService::new(&core.store).runtime_config()?;
     let design_profile = ConfigService::active_profile(&config, "design")?.clone();
-    let implement_profile = ConfigService::active_profile(&config, "implement")?.clone();
+    let simple_mode = crate::core::job::simple_mode(&envelope)?;
+    let implement_profile = if simple_mode {
+        None
+    } else {
+        Some(ConfigService::active_profile(&config, "implement")?.clone())
+    };
 
-    match mode.as_str() {
+    // 同一个任务的缓存：重跑（失败后重试 / 停止后继续）时，已经买过的模型答案
+    // 与图片从这里回放，只有没跑完的部分才真的花钱。
+    let cache = AnswerCache::new(&core.app_data, job_id);
+
+    let output = match mode.as_str() {
         "paper_figure" => {
             let payload: PaperFigurePayload = serde_json::from_value(payload)?;
-            stage("paper_validate", "校验 Figure 输入");
+            stage("paper_validate", "校验输入");
             figure::validate_payload(&payload)?;
 
-            stage("paper_templates", "读取 template 和 few-shot 参考");
+            stage("paper_templates", "读取参考模板");
             let templates = TemplateService::new(&core.store, &core.app_data);
             let mut images = Vec::new();
             let mut metadata = Vec::new();
@@ -248,11 +259,15 @@ async fn run(
 
             let similar_cases =
                 recall_cases(core, job_id, fingerprint.as_ref(), stage, "paper_memory");
+            // 检索是加分项而不是前提：没有配检索模型时图照样能画，只是少了
+            // 联网得到的客观外观描述。
+            let search_profile = ConfigService::active_profile(&config, "search").ok();
             let run = FigureRun {
                 prompts: &core.prompts,
                 config: &config,
                 design_profile: &design_profile,
-                implement_profile: &implement_profile,
+                implement_profile: implement_profile.as_ref(),
+                search_profile,
                 template_images: images,
                 template_metadata: serde_json::Value::Array(metadata),
                 app_data: &core.app_data,
@@ -260,21 +275,31 @@ async fn run(
                 design_log,
                 similar_cases,
                 fingerprint: fingerprint.clone(),
+                cache: Some(&cache),
             };
             let output = run.run(&payload, stage).await?;
+            if simple_mode {
+                persist_final_prompts(&core.store, job_id, &output.final_prompts, design_log)?;
+            }
             Ok(RunOutput {
-                images: vec![save_image(core, job_id, "figure.png", &output.image_b64)?],
+                images: output
+                    .image_b64
+                    .as_deref()
+                    .map(|image| save_image(core, job_id, "figure.png", image))
+                    .transpose()?
+                    .into_iter()
+                    .collect(),
                 case: fingerprint.map(|fingerprint| (fingerprint, output.design)),
             })
         }
         "ppt_slide" => {
             let payload: PptSlidePayload = serde_json::from_value(payload)?;
-            stage("ppt_validate", "校验 Slide 输入");
+            stage("ppt_validate", "校验输入");
             validate_payload(&payload)?;
             let search_profile = ConfigService::active_profile(&config, "search")?.clone();
 
             let assets = AssetService::new(&core.store, &core.app_data);
-            stage("ppt_template", "读取 template 图片");
+            stage("ppt_template", "读取母版图片");
             let template_image = if let Some(template_id) = payload.template_ref() {
                 let templates = TemplateService::new(&core.store, &core.app_data);
                 let detail = templates.template_detail(template_id)?;
@@ -308,16 +333,21 @@ async fn run(
                 prompts: &core.prompts,
                 config: &config,
                 design_profile: &design_profile,
-                implement_profile: &implement_profile,
+                implement_profile: implement_profile.as_ref(),
                 search_profile: &search_profile,
                 template_image,
                 material_context,
                 design_log,
                 similar_cases,
                 fingerprint: fingerprint.clone(),
+                cache: Some(&cache),
             };
             let output = run.run(&payload, stage).await?;
-            stage("ppt_save", "保存生成图片");
+            if simple_mode {
+                persist_final_prompts(&core.store, job_id, &output.final_prompts, design_log)?;
+            } else {
+                stage("ppt_save", "保存图片");
+            }
             let images = output
                 .pages
                 .iter()
@@ -335,7 +365,39 @@ async fn run(
             "invalid_mode",
             format!("Unsupported job mode: {other}"),
         )),
+    }?;
+    // 任务已经成功跑完，缓存没有被重试复用的机会，直接清掉省磁盘。
+    cache.clear();
+    Ok(output)
+}
+
+fn persist_final_prompts(
+    store: &crate::core::store::Store,
+    job_id: &str,
+    prompts: &[String],
+    design_log: DesignSink<'_>,
+) -> AppResult<()> {
+    if prompts.is_empty() || prompts.iter().any(|prompt| prompt.trim().is_empty()) {
+        return Err(AppError::new(
+            "missing_final_prompt",
+            "Final drawing prompts are empty",
+        ));
     }
+    for (index, prompt) in prompts.iter().enumerate() {
+        let step = format!("final_prompt_{}", index + 1);
+        let label = format!("最终制图提示词 {}", index + 1);
+        // The prompt is the whole product here, so the write is checked rather
+        // than left to the event sink: the job must not be marked done with
+        // nothing stored to show for it.
+        JobService::new(store).record_design_log(job_id, &step, &label, "succeeded", prompt)?;
+        design_log(DesignLog::End {
+            step: &step,
+            label: &label,
+            text: prompt,
+            ok: true,
+        });
+    }
+    Ok(())
 }
 
 fn read_image_input(path: &std::path::Path, mime_type: &str) -> AppResult<ImageInput> {
@@ -434,6 +496,73 @@ mod tests {
             pool.push("paper_design", "的后半").as_deref(),
             Some("新的一段的后半"),
             "重试后发出的内容不能带上被丢弃的那一次"
+        );
+    }
+
+    fn store(tag: &str) -> (std::path::PathBuf, crate::core::store::Store) {
+        let dir = std::env::temp_dir().join(format!(
+            "dreampaper-execute-test-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("建临时目录");
+        let store = crate::core::store::Store::initialize(&dir).expect("初始化 store");
+        (dir, store)
+    }
+
+    #[test]
+    fn final_prompts_are_persisted_before_the_job_may_complete() {
+        let (_dir, store) = store("final-prompt");
+        let job = JobService::new(&store)
+            .create_job(serde_json::json!({"mode": "paper_figure"}))
+            .expect("建任务");
+
+        // The sink type is `Fn`, so what it collects lives behind a lock.
+        let streamed = std::sync::Mutex::new(Vec::new());
+        let sink = |entry: DesignLog<'_>| {
+            if let DesignLog::End { step, text, .. } = entry {
+                streamed
+                    .lock()
+                    .expect("锁")
+                    .push((step.to_string(), text.to_string()));
+            }
+        };
+
+        persist_final_prompts(&store, &job.id, &["第一页提示词".to_string()], &sink)
+            .expect("保存最终提示词");
+        let loaded = JobService::new(&store)
+            .get_job(job.id.clone())
+            .expect("读任务");
+        assert_eq!(loaded.design_logs.len(), 1);
+        assert_eq!(loaded.design_logs[0].step, "final_prompt_1");
+        assert_eq!(loaded.design_logs[0].content, "第一页提示词");
+        assert_eq!(loaded.design_logs[0].status, "succeeded");
+        assert_eq!(
+            *streamed.lock().expect("锁"),
+            vec![("final_prompt_1".to_string(), "第一页提示词".to_string())],
+            "事件只在写入成功之后才发出"
+        );
+
+        // A prompt with nothing in it is a pipeline bug, not a product.
+        for empty in [Vec::new(), vec![String::new()], vec!["  ".to_string()]] {
+            assert!(persist_final_prompts(&store, &job.id, &empty, &sink).is_err());
+        }
+
+        // The write is checked: a store that cannot take the prompt has to fail
+        // the job instead of completing it with nothing saved.
+        store
+            .connection()
+            .expect("连接")
+            .execute_batch("DROP TABLE job_design_logs")
+            .expect("模拟存储故障");
+        assert!(
+            persist_final_prompts(&store, &job.id, &["第二页提示词".to_string()], &sink).is_err()
+        );
+        assert_eq!(
+            streamed.lock().expect("锁").len(),
+            1,
+            "写入失败时不得再发成功事件，否则前端会看到并未落盘的提示词"
         );
     }
 }

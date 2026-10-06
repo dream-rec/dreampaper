@@ -2,6 +2,7 @@ export type Theme = 'light' | 'dark';
 
 const THEME_KEY = 'dreampaper.theme';
 const AUTO_UPDATE_KEY = 'dreampaper.autoUpdate';
+const SIMPLE_MODE_KEY = 'dreampaper.simpleMode';
 
 function read(key: string): string | null {
   try {
@@ -47,4 +48,13 @@ export function autoUpdateEnabled(): boolean {
 
 export function saveAutoUpdate(enabled: boolean): void {
   write(AUTO_UPDATE_KEY, String(enabled));
+}
+
+/** Seeds the Simple Mode switch; the live switch lives in React state, not here. */
+export function simpleModePreference(): boolean {
+  return read(SIMPLE_MODE_KEY) === 'true';
+}
+
+export function saveSimpleMode(enabled: boolean): void {
+  write(SIMPLE_MODE_KEY, String(enabled));
 }

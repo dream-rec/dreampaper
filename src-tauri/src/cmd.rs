@@ -190,6 +190,29 @@ pub fn cancel_job(app: AppHandle, state: State<'_, AppState>, id: String) -> App
 }
 
 #[tauri::command]
+pub fn resume_job(app: AppHandle, state: State<'_, AppState>, id: String) -> AppResult<JobRecord> {
+    let record = state.core().resume_job(id)?;
+    let _ = app.emit(
+        "job://stage",
+        JobEventPayload {
+            job_id: record.id.clone(),
+            status: record.status.clone(),
+            stage: record
+                .stage
+                .clone()
+                .unwrap_or_else(|| "resuming".to_string()),
+            message: record
+                .message
+                .clone()
+                .unwrap_or_else(|| "继续上次进度".to_string()),
+            timestamp: Utc::now(),
+        },
+    );
+    crate::core::pipeline::execute::spawn(app, state.core_arc(), record.id.clone());
+    Ok(record)
+}
+
+#[tauri::command]
 pub fn delete_templates(state: State<'_, AppState>, ids: Vec<String>) -> AppResult<usize> {
     state.core().delete_templates(ids)
 }

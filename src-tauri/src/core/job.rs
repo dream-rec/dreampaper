@@ -75,6 +75,20 @@ pub struct JobRecord {
     /// memory case. `None` until rated, or when the job never reached implement.
     #[serde(default)]
     pub rating: Option<String>,
+    /// 简单模式：产物是制图提示词、没有成品图，历史卡片因此显示参考母版。
+    #[serde(default)]
+    pub simple: bool,
+}
+
+pub fn simple_mode(envelope: &serde_json::Value) -> AppResult<bool> {
+    match envelope.get("simple_mode") {
+        None => Ok(false),
+        Some(serde_json::Value::Bool(value)) => Ok(*value),
+        _ => Err(AppError::new(
+            "invalid_payload",
+            "simple_mode must be a boolean",
+        )),
+    }
 }
 
 pub struct JobService<'a> {
@@ -87,6 +101,7 @@ impl<'a> JobService<'a> {
     }
 
     pub fn create_job(&self, payload: serde_json::Value) -> AppResult<JobRecord> {
+        simple_mode(&payload)?;
         let mode = payload
             .get("mode")
             .and_then(|value| value.as_str())
@@ -115,6 +130,8 @@ impl<'a> JobService<'a> {
         let mut record = stmt
             .query_row(params![id], |row| {
                 let mode: String = row.get(1)?;
+                let payload_json: Option<String> = row.get(7)?;
+                let result_json: Option<String> = row.get(8)?;
                 Ok(JobRecord {
                     id: row.get(0)?,
                     mode: mode.clone(),
@@ -126,11 +143,10 @@ impl<'a> JobService<'a> {
                     images: Vec::new(),
                     events: Vec::new(),
                     error: None,
-                    title: job_title(&mode, row.get(7)?),
-                    thumbnail: job_thumbnail(row.get(8)?),
-                    payload: row
-                        .get::<_, Option<String>>(7)?
-                        .and_then(|raw| serde_json::from_str(&raw).ok()),
+                    title: job_title(&mode, payload_json.clone()),
+                    thumbnail: preview_url(result_json.as_deref(), payload_json.as_deref(), &mode),
+                    simple: simple_flag(payload_json.as_deref()),
+                    payload: payload_json.and_then(|raw| serde_json::from_str(&raw).ok()),
                     design_logs: Vec::new(),
                     rating: None,
                 })
@@ -156,6 +172,8 @@ impl<'a> JobService<'a> {
         )?;
         let rows = stmt.query_map(params![limit as i64, offset as i64], |row| {
             let mode: String = row.get(1)?;
+            let payload_json: Option<String> = row.get(7)?;
+            let result_json: Option<String> = row.get(8)?;
             Ok(JobRecord {
                 id: row.get(0)?,
                 mode: mode.clone(),
@@ -167,8 +185,9 @@ impl<'a> JobService<'a> {
                 images: Vec::new(),
                 events: Vec::new(),
                 error: None,
-                title: job_title(&mode, row.get(7)?),
-                thumbnail: job_thumbnail(row.get(8)?),
+                title: job_title(&mode, payload_json.clone()),
+                thumbnail: preview_url(result_json.as_deref(), payload_json.as_deref(), &mode),
+                simple: simple_flag(payload_json.as_deref()),
                 payload: None,
                 design_logs: Vec::new(),
                 rating: None,
@@ -351,6 +370,31 @@ impl<'a> JobService<'a> {
         self.mark_stage(job_id, "cancelled", message, "cancelled")
     }
 
+    /// 把失败或已停止的任务放回运行状态重跑。
+    ///
+    /// 输入、设计日志与已经生成的图片都保留，步骤缓存也还在，所以只有没跑完的部分
+    /// 会真的重新调用。成功完成的任务不能“继续”，它在结果上已经没有可补的东西。
+    pub fn resume(&self, job_id: &str) -> AppResult<JobRecord> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.store.connection()?;
+        let changed = conn.execute(
+            "UPDATE jobs SET status = 'running', stage = 'resuming', message = '继续上次进度', error_json = NULL, updated_at = ?1 \
+             WHERE id = ?2 AND status IN ('failed', 'cancelled')",
+            params![now, job_id],
+        )?;
+        drop(conn);
+        if changed == 0 {
+            // 先分清「没这个任务」与「这个任务不在可继续的状态」，报错才有用。
+            self.get_job(job_id.to_string())?;
+            return Err(AppError::new(
+                "job_not_resumable",
+                "只有失败或已停止的任务可以继续",
+            ));
+        }
+        self.mark_stage(job_id, "resuming", "继续上次进度", "running")?;
+        self.get_job(job_id.to_string())
+    }
+
     /// Removes a settled job with its stage history, outputs and logs.
     /// Live jobs are rejected - cancel first. Missing directories are tolerated
     /// so partially-written jobs can still be cleaned up.
@@ -497,6 +541,14 @@ fn asset_id_from_url(url: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+fn simple_flag(payload_json: Option<&str>) -> bool {
+    // 宽松读法：只影响列表怎么显示；严格的布尔校验在真正执行任务时做。
+    payload_json
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .and_then(|value| value.get("simple_mode").and_then(|v| v.as_bool()))
+        .unwrap_or(false)
+}
+
 /// Derived display title for list rendering. Localization of the fallback
 /// ("untitled") stays on the frontend; the backend only extracts.
 fn job_title(mode: &str, payload_json: Option<String>) -> Option<String> {
@@ -526,24 +578,95 @@ fn job_title(mode: &str, payload_json: Option<String>) -> Option<String> {
 /// has headroom on a HiDPI screen while costing ~1/45th of the source decode.
 const THUMBNAIL_WIDTH: u32 = 800;
 
-fn job_thumbnail(result_json: Option<String>) -> Option<String> {
+fn job_thumbnail(result_json: Option<&str>) -> Option<String> {
     let raw = result_json?;
     let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
     let url = value.get("images")?.get(0)?.get("url")?.as_str()?;
     if url.trim().is_empty() {
         return None;
     }
+    Some(thumbnail_url(url))
+}
+
+/// 历史卡片的预览：有成品图用成品图；简单模式的产物是提示词、成品图永远不存在，
+/// 于是退回所选参考母版。普通模式没有成品图只说明没跑完，不能拿参考图冒充结果。
+fn preview_url(
+    result_json: Option<&str>,
+    payload_json: Option<&str>,
+    mode: &str,
+) -> Option<String> {
+    job_thumbnail(result_json).or_else(|| {
+        simple_flag(payload_json)
+            .then(|| reference_thumbnail(payload_json, mode))
+            .flatten()
+    })
+}
+
+/// 同一件资源在两个协议下都走缩略图缓存，列表才不会整页解码大图。
+fn thumbnail_url(url: &str) -> String {
     let normalized = normalize_asset_url(url);
-    // Only our own protocol can rescale; an external link is served as-is.
-    if normalized.contains("dp-asset") {
-        return Some(format!("{normalized}?w={THUMBNAIL_WIDTH}"));
+    if normalized.contains("dp-asset") || normalized.contains("dp-template") {
+        return format!("{normalized}?w={THUMBNAIL_WIDTH}");
     }
-    Some(normalized)
+    // 只有我们自己的协议能重缩放；外面的链接原样发出去。
+    normalized
+}
+
+/// 简单模式没有成品图（产物是制图提示词），卡片上退回它选中的那件参考图：
+/// 母版/模板才是这个任务的视觉身份，比一个空图标有信息量。
+fn reference_thumbnail(payload_json: Option<&str>, mode: &str) -> Option<String> {
+    let raw = payload_json?;
+    let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let payload = value.get("payload").unwrap_or(&value);
+    let text = |key: &str| {
+        payload
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+    };
+    // 幻灯片：先看模板，再看上传的母版图；科研图是一组模板，取第一张。
+    if mode == "ppt_slide" {
+        if let Some(id) = text("template_id") {
+            return Some(thumbnail_url(&protocol_url("dp-template", id)));
+        }
+        if let Some(id) = text("template_asset_id") {
+            return Some(thumbnail_url(&protocol_url("dp-asset", id)));
+        }
+        return None;
+    }
+    let id = payload
+        .get("template_ids")
+        .and_then(|v| v.as_array())?
+        .iter()
+        .find_map(|item| item.as_str().map(str::trim))
+        .filter(|id| !id.is_empty())?;
+    Some(thumbnail_url(&protocol_url("dp-template", id)))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The top-level flag is a snapshot of the UI switch: absent means a job
+    /// stored before Simple Mode existed, and anything but a real boolean is a
+    /// malformed request rather than a truthy value.
+    #[test]
+    fn simple_mode_defaults_to_off_and_rejects_non_booleans() {
+        assert!(
+            !simple_mode(&serde_json::json!({"mode": "paper_figure"})).expect("旧任务默认普通模式")
+        );
+        assert!(simple_mode(&serde_json::json!({"simple_mode": true})).expect("显式开启"));
+        assert!(!simple_mode(&serde_json::json!({"simple_mode": false})).expect("显式关闭"));
+        for invalid in [
+            serde_json::json!({"simple_mode": "true"}),
+            serde_json::json!({"simple_mode": 1}),
+            serde_json::json!({"simple_mode": null}),
+        ] {
+            let error = simple_mode(&invalid).expect_err("非布尔必须报错");
+            assert_eq!(error.code, "invalid_payload");
+        }
+    }
 
     /// Old jobs hold the other platform's URL form; reads have to rebuild it
     /// into one this machine can load, or images under recent jobs stay broken
@@ -619,12 +742,12 @@ mod tests {
         // The grid gets the downscaled variant; the full image stays one query
         // strip away for the lightbox.
         assert_eq!(
-            job_thumbnail(Some(result)),
+            job_thumbnail(Some(result.as_str())),
             Some(format!("{}?w=800", protocol_url("dp-asset", "abc")))
         );
         assert_eq!(job_thumbnail(None), None);
         let no_images = serde_json::json!({}).to_string();
-        assert_eq!(job_thumbnail(Some(no_images)), None);
+        assert_eq!(job_thumbnail(Some(no_images.as_str())), None);
 
         // An image hosted elsewhere cannot be rescaled by our protocol, so it
         // must come back untouched rather than with a query we cannot honour.
@@ -633,9 +756,108 @@ mod tests {
         })
         .to_string();
         assert_eq!(
-            job_thumbnail(Some(external)),
+            job_thumbnail(Some(external.as_str())),
             Some("https://example.com/x.png".to_string())
         );
+    }
+
+    #[test]
+    fn a_simple_mode_card_falls_back_to_the_reference_image() {
+        let no_result = || serde_json::json!({ "images": [] }).to_string();
+        // 幻灯片：模板优先，其次是上传的母版图。
+        let slide = serde_json::json!({
+            "mode": "ppt_slide",
+            "simple_mode": true,
+            "payload": { "template_id": "tpl-1", "template_asset_id": "asset-1" }
+        })
+        .to_string();
+        assert_eq!(
+            preview_url(Some(&no_result()), Some(&slide), "ppt_slide"),
+            Some(thumbnail_url(&protocol_url("dp-template", "tpl-1")))
+        );
+        let uploaded = serde_json::json!({
+            "mode": "ppt_slide",
+            "simple_mode": true,
+            "payload": { "template_id": "", "template_asset_id": "asset-1" }
+        })
+        .to_string();
+        assert_eq!(
+            preview_url(Some(&no_result()), Some(&uploaded), "ppt_slide"),
+            Some(thumbnail_url(&protocol_url("dp-asset", "asset-1")))
+        );
+        // 科研图是一组模板，取第一张。
+        let figure = serde_json::json!({
+            "mode": "paper_figure",
+            "simple_mode": true,
+            "payload": { "template_ids": ["tpl-2", "tpl-3"] }
+        })
+        .to_string();
+        assert_eq!(
+            preview_url(Some(&no_result()), Some(&figure), "paper_figure"),
+            Some(thumbnail_url(&protocol_url("dp-template", "tpl-2")))
+        );
+        // 普通模式没跑完（没有成品图）：不拿参考图冒充结果。
+        let normal = serde_json::json!({
+            "mode": "paper_figure",
+            "payload": { "template_ids": ["tpl-2"] }
+        })
+        .to_string();
+        assert_eq!(
+            preview_url(Some(&no_result()), Some(&normal), "paper_figure"),
+            None
+        );
+        // 旧任务（无 payload / 无参考图）仍是空图标，不能报错。
+        assert_eq!(preview_url(Some(&no_result()), None, "ppt_slide"), None);
+        assert_eq!(
+            preview_url(Some(&no_result()), Some("{ broken"), "ppt_slide"),
+            None
+        );
+        // 有成品图时预览永远是成品图。
+        let result = serde_json::json!({
+            "images": [{ "url": "http://dp-asset.localhost/done" }]
+        })
+        .to_string();
+        assert_eq!(
+            preview_url(Some(&result), Some(&slide), "ppt_slide"),
+            Some(thumbnail_url(&protocol_url("dp-asset", "done")))
+        );
+    }
+
+    #[test]
+    fn a_simple_mode_row_carries_its_flag_and_the_reference_preview() {
+        let dir = service_dir("list-simple");
+        let store = Store::initialize(&dir).expect("初始化 store");
+        let jobs = JobService::new(&store);
+        let job = jobs
+            .create_job(serde_json::json!({
+                "mode": "ppt_slide",
+                "simple_mode": true,
+                "payload": { "template_id": "tpl-9", "material_text": "介绍一下 grokbot" }
+            }))
+            .expect("建任务");
+        // 简单模式没有成品图。
+        jobs.finish(&job.id, &[]).expect("收尾");
+
+        let listed = jobs.list_jobs(20, 0).expect("列表");
+        let row = listed.iter().find(|r| r.id == job.id).expect("找到任务");
+        assert!(row.simple, "简单模式要在列表行上看得出来");
+        assert_eq!(
+            row.thumbnail.as_deref(),
+            Some(thumbnail_url(&protocol_url("dp-template", "tpl-9")).as_str())
+        );
+
+        // 普通模式没有参考图时仍然是空预览，不能被误标。
+        let normal = jobs
+            .create_job(serde_json::json!({
+                "mode": "paper_figure",
+                "payload": { "figure_title": "普通任务" }
+            }))
+            .expect("建任务");
+        jobs.finish(&normal.id, &[]).expect("收尾");
+        let listed = jobs.list_jobs(20, 0).expect("列表");
+        let row = listed.iter().find(|r| r.id == normal.id).expect("找到任务");
+        assert!(!row.simple);
+        assert_eq!(row.thumbnail, None);
     }
 
     #[test]
@@ -768,7 +990,7 @@ mod tests {
         jobs.record_design_log(
             &job.id,
             "paper_structure",
-            "分析 template 结构",
+            "分析母版结构",
             "succeeded",
             "{\"structure_plan\":1}",
         )
@@ -795,7 +1017,7 @@ mod tests {
         let loaded = jobs.get_job(job.id.clone()).expect("读任务");
         assert_eq!(loaded.design_logs.len(), 2, "同一 step 不该堆两张卡");
         assert_eq!(loaded.design_logs[0].step, "paper_structure");
-        assert_eq!(loaded.design_logs[0].label, "分析 template 结构");
+        assert_eq!(loaded.design_logs[0].label, "分析母版结构");
         assert_eq!(loaded.design_logs[1].content, "修复后的答案");
         assert!(loaded
             .design_logs
@@ -852,5 +1074,48 @@ mod tests {
         assert_eq!(after.status, "cancelled");
         assert_eq!(after.stage.as_deref(), Some("cancelled"));
         assert!(after.images.is_empty(), "停止之后不该再把产出挂回这条任务");
+    }
+
+    /// 失败与已停止的任务可以继续；还在跑和已经成功的不能。
+    #[test]
+    fn only_settled_unsuccessful_jobs_can_be_resumed() {
+        let dir = service_dir("resume");
+        let store = Store::initialize(&dir).expect("初始化 store");
+        let jobs = JobService::new(&store);
+        let job = jobs
+            .create_job(serde_json::json!({ "mode": "paper_figure" }))
+            .expect("建任务");
+
+        // 跑着的任务不能“继续”：它已经在跑了。
+        let error = jobs.resume(&job.id).expect_err("运行中的任务不可继续");
+        assert_eq!(error.code, "job_not_resumable");
+
+        jobs.mark_stage(&job.id, "paper_design", "生成制图方案", "running")
+            .expect("推进阶段");
+        jobs.fail(&job.id, "HTTP 500", None).expect("失败");
+        let resumed = jobs.resume(&job.id).expect("失败的任务可以继续");
+        assert_eq!(resumed.status, "running");
+        assert_eq!(resumed.stage.as_deref(), Some("resuming"));
+        assert_eq!(resumed.message.as_deref(), Some("继续上次进度"));
+        assert!(resumed.error.is_none(), "继续之后不该还挂着上一次的报错");
+        // 输入与已经产生的日志都留着，重跑时才能接着用。
+        assert!(resumed.payload.is_some());
+        assert_eq!(
+            resumed.events.last().map(|event| event.status.as_str()),
+            Some("running")
+        );
+
+        // 停止过的任务同样可以继续。
+        jobs.cancel(&job.id, "任务已停止").expect("停止");
+        let resumed = jobs.resume(&job.id).expect("已停止的任务可以继续");
+        assert_eq!(resumed.status, "running");
+
+        // 成功完成之后没有可补的东西。
+        jobs.finish(&job.id, &[]).expect("完成");
+        let error = jobs.resume(&job.id).expect_err("成功的任务不可继续");
+        assert_eq!(error.code, "job_not_resumable");
+
+        let missing = jobs.resume("没有这个任务").expect_err("不存在的任务");
+        assert_eq!(missing.code, "job_not_found");
     }
 }

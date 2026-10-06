@@ -34,6 +34,8 @@ pub struct DesignStep<'a> {
     pub label: &'a str,
 }
 
+use crate::core::pipeline::cache::StepCache;
+
 pub struct DesignCall<'a> {
     pub profile: &'a ModelProfile,
     pub system_prompt: &'a str,
@@ -42,6 +44,8 @@ pub struct DesignCall<'a> {
     pub proxy_url: Option<&'a str>,
     pub response_sink: Option<&'a (dyn Fn(&str) + Send + Sync)>,
     pub log: Option<DesignStep<'a>>,
+    /// 有缓存时，同一次调用的答案只买一次：重跑任务时命中就回放。
+    pub cache: Option<StepCache<'a>>,
 }
 
 impl DesignCall<'_> {
@@ -57,6 +61,19 @@ impl DesignCall<'_> {
     }
 
     async fn attempt(&self, prompt: &str) -> AppResult<String> {
+        // 命中缓存时不发请求，但照样发 End：进度、日志与卡片内容跟第一次一模一样，
+        // 只有网络调用被省掉。
+        let cached = self.cache.map(|step| {
+            let key = step.design_key(self.profile, self.system_prompt, prompt, self.images);
+            (step, key)
+        });
+        if let Some((step, key)) = &cached {
+            if let Some(text) = step.text(key) {
+                self.log_end(&text, true);
+                return Ok(text);
+            }
+        }
+
         let relay = self.log.map(|step| {
             move |delta: DesignDelta<'_>| match delta {
                 DesignDelta::Restart => (step.sink)(DesignLog::Reset { step: step.step }),
@@ -78,11 +95,20 @@ impl DesignCall<'_> {
             sink,
         )
         .await;
+        // 只有成功的答案才值得回放，失败的调用下次重跑必须真的重试。
+        if let (Some((step, key)), Ok(text)) = (&cached, &result) {
+            step.put_text(key, text);
+        }
+        let (text, ok) = match &result {
+            Ok(text) => (text.as_str(), true),
+            Err(error) => (error.message.as_str(), false),
+        };
+        self.log_end(text, ok);
+        result
+    }
+
+    fn log_end(&self, text: &str, ok: bool) {
         if let Some(step) = self.log {
-            let (text, ok) = match &result {
-                Ok(text) => (text.as_str(), true),
-                Err(error) => (error.message.as_str(), false),
-            };
             (step.sink)(DesignLog::End {
                 step: step.step,
                 label: step.label,
@@ -90,7 +116,6 @@ impl DesignCall<'_> {
                 ok,
             });
         }
-        result
     }
 }
 
@@ -367,5 +392,156 @@ mod tests {
         assert!(repair_prompt.contains("failed semantic validation"));
         assert!(repair_prompt.contains("visible_text must be short label strings"));
         assert!(repair_prompt.contains("concise labels"));
+    }
+
+    /// 本地假上游：记录每次收到的请求体，用来断言「第二次没有真的发请求」。
+    async fn counting_upstream(
+        status: u16,
+        body: &'static str,
+    ) -> (String, std::sync::Arc<Mutex<Vec<String>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let requests = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let recorded = std::sync::Arc::clone(&requests);
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let recorded = std::sync::Arc::clone(&recorded);
+                tokio::spawn(async move {
+                    let mut input = Vec::new();
+                    let mut buffer = [0; 4096];
+                    loop {
+                        let Ok(count) = stream.read(&mut buffer).await else {
+                            return;
+                        };
+                        if count == 0 {
+                            break;
+                        }
+                        input.extend_from_slice(&buffer[..count]);
+                        if let Some(end) = input.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                            let headers = String::from_utf8_lossy(&input[..end]).to_string();
+                            let length = headers
+                                .lines()
+                                .find_map(|line| {
+                                    let (name, value) = line.split_once(':')?;
+                                    name.eq_ignore_ascii_case("content-length")
+                                        .then(|| value.trim().parse::<usize>().unwrap())
+                                })
+                                .unwrap_or(0);
+                            if input.len() >= end + 4 + length {
+                                break;
+                            }
+                        }
+                    }
+                    recorded
+                        .lock()
+                        .unwrap()
+                        .push(String::from_utf8_lossy(&input).to_string());
+                    let response = format!(
+                        "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        (base, requests)
+    }
+
+    fn local_design_profile(base: String) -> crate::core::config::ModelProfile {
+        serde_json::from_value(serde_json::json!({
+            "id": "design", "role": "design", "name": "Design", "protocol": "openai_chat",
+            "base_url": base, "model": "Build/local", "api_key": "local-test-only",
+            "headers": {}, "max_retries": 0, "output_defaults": {}
+        }))
+        .unwrap()
+    }
+
+    fn cache_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "dreampaper-runner-cache-{tag}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    /// 重跑同一个任务时，已经买过的设计答案必须从缓存回放：不再发第二次请求。
+    #[tokio::test]
+    async fn a_successful_design_answer_is_replayed_without_a_second_request() {
+        use crate::core::pipeline::cache::{AnswerCache, StepCache};
+
+        let upstream = serde_json::json!({
+            "choices": [{ "message": { "content": "第一份答案" } }]
+        })
+        .to_string();
+        let (base, requests) = counting_upstream(200, Box::leak(upstream.into_boxed_str())).await;
+        let profile = local_design_profile(base);
+        let cache = AnswerCache::new(&cache_dir("replay"), "job");
+        let call = DesignCall {
+            profile: &profile,
+            system_prompt: "system",
+            user_prompt: "prompt",
+            images: &[],
+            proxy_url: None,
+            response_sink: None,
+            log: None,
+            cache: Some(StepCache {
+                cache: &cache,
+                scope: "paper_design",
+            }),
+        };
+
+        assert_eq!(call.first().await.expect("第一次真实调用"), "第一份答案");
+        assert_eq!(requests.lock().unwrap().len(), 1);
+        // 重跑：同样的调用直接回放，请求数不变。
+        assert_eq!(call.first().await.expect("第二次回放"), "第一份答案");
+        assert_eq!(requests.lock().unwrap().len(), 1, "命中缓存后不该再发请求");
+        // 换一份提示词就是另一次调用。
+        let other = DesignCall {
+            user_prompt: "换了的 prompt",
+            ..call
+        };
+        assert_eq!(
+            other.first().await.expect("换了输入要重新调用"),
+            "第一份答案"
+        );
+        assert_eq!(requests.lock().unwrap().len(), 2);
+    }
+
+    /// 失败的调用绝不能进缓存：重跑必须真的重试，而不是回放一个错误。
+    #[tokio::test]
+    async fn a_failed_design_call_is_never_cached() {
+        use crate::core::pipeline::cache::{AnswerCache, StepCache};
+
+        let (base, requests) = counting_upstream(500, "{\"error\":\"boom\"}").await;
+        let profile = local_design_profile(base);
+        let cache = AnswerCache::new(&cache_dir("failed"), "job");
+        let call = DesignCall {
+            profile: &profile,
+            system_prompt: "system",
+            user_prompt: "prompt",
+            images: &[],
+            proxy_url: None,
+            response_sink: None,
+            log: None,
+            cache: Some(StepCache {
+                cache: &cache,
+                scope: "paper_design",
+            }),
+        };
+
+        assert!(call.first().await.is_err(), "上游 500 应当是失败");
+        let after_first = requests.lock().unwrap().len();
+        assert!(call.first().await.is_err());
+        assert_eq!(
+            requests.lock().unwrap().len(),
+            after_first + 1,
+            "失败不会被缓存，第二次必须真的再发一次"
+        );
     }
 }

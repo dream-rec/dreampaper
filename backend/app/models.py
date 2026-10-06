@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool
 
 
 DesignProtocol = Literal["openai_chat", "openai_responses", "anthropic_messages"]
 ImplementProtocol = Literal["image2", "banana2", "banna2"]
-SearchProtocol = Literal["duckduckgo_html", "tavily", "openai_chat"]
+SearchProtocol = Literal["duckduckgo", "duckduckgo_html", "tavily", "openai_chat", "grok_search"]
+# duckduckgo_html 是旧名字，留在字面量里只为让老配置还能被读进来；
+# 载入时会改写成 duckduckgo（与 openai_chat -> grok_search 同一套处理）。
 ModelRole = Literal["design", "implement", "search"]
 JobMode = Literal["paper_figure", "ppt_slide"]
 
@@ -108,6 +110,7 @@ class PptSlidePayload(BaseModel):
 
 class JobCreateRequest(BaseModel):
     mode: JobMode
+    simple_mode: StrictBool = False
     payload: PaperFigurePayload | PptSlidePayload
 
 
@@ -138,6 +141,14 @@ class JobError(BaseModel):
     suggestion: str | None = None
 
 
+class JobDesignLog(BaseModel):
+    step: str
+    label: str
+    status: str
+    content: str
+    timestamp: str
+
+
 class JobRecord(BaseModel):
     id: str
     mode: JobMode
@@ -148,6 +159,8 @@ class JobRecord(BaseModel):
     updated_at: str
     images: list[JobImage] = Field(default_factory=list)
     events: list[JobEvent] = Field(default_factory=list)
+    design_logs: list[JobDesignLog] = Field(default_factory=list)
+    payload: dict[str, Any] | None = None
     error: JobError | None = None
     internal_artifacts: dict[str, Any] = Field(default_factory=dict)
 

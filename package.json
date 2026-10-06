@@ -1,6 +1,6 @@
 {
   "name": "dreampaper",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "type": "module",
   "scripts": {
@@ -8,7 +8,7 @@
     "build": "node .github/scripts/check-icon.mjs && tsc -b && vite build",
     "preview": "vite preview --host 127.0.0.1",
     "tauri": "tauri",
-    "tauri:dev": "tauri dev",
+    "tauri:dev": "node scripts/dev.mjs && tauri dev",
     "tauri:build": "node scripts/sidecar.mjs && tauri build",
     "test": "vitest run",
     "gate:ort": "node scripts/ort.mjs",

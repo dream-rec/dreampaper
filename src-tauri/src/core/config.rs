@@ -57,7 +57,8 @@ impl ModelProfile {
 fn default_timeout_seconds(role: &str) -> i64 {
     match role {
         "implement" => 600,
-        "search" => 15,
+        // search 与 design 同级：grok_search 让上游模型自己联网检索，
+        // 实测一次请求就要几十秒，旧的 15 秒默认值必然超时。
         _ => 120,
     }
 }
@@ -196,6 +197,22 @@ fn normalize_config(mut incoming: AppConfig, existing: Option<AppConfig>) -> App
 }
 
 fn ensure_search_profile(config: &mut AppConfig) {
+    // 搜索角色只剩一个联网协议：旧的 openai_chat 搜索配置并入 grok_search
+    // （grok_search 就是 chat completions + 要求上游模型调用联网工具）。
+    // 读取、运行时与保存三条路径都经过这里，配置不会停留在已下线的选项上。
+    for profile in &mut config.model_profiles {
+        if profile.role != "search" {
+            continue;
+        }
+        if profile.protocol == "openai_chat" {
+            profile.protocol = SEARCH_MODEL_PROTOCOL.to_string();
+        }
+        // 旧名字换成新名字：duckduckgo_html -> duckduckgo。
+        if profile.protocol == LEGACY_DUCKDUCKGO_PROTOCOL {
+            profile.protocol = DUCKDUCKGO_PROTOCOL.to_string();
+        }
+    }
+    repair_search_profiles(config);
     if !config
         .model_profiles
         .iter()
@@ -211,6 +228,90 @@ fn ensure_search_profile(config: &mut AppConfig) {
             .map(|item| item.id.clone())
             .unwrap_or_else(default_search_profile_id);
     }
+}
+
+/// 带模型的那个搜索协议：需要 URL、模型与密钥三样齐全。
+const SEARCH_MODEL_PROTOCOL: &str = "grok_search";
+
+/// 免密钥、也免模型的那个协议：端点固定，URL 字段不显示。
+const DUCKDUCKGO_PROTOCOL: &str = "duckduckgo";
+
+/// 旧配置里的名字。
+const LEGACY_DUCKDUCKGO_PROTOCOL: &str = "duckduckgo_html";
+
+/// 该协议要不要填模型：只有对话式联网搜索用得到，其余协议填了也不会读。
+fn search_uses_model(protocol: &str) -> bool {
+    !matches!(protocol, DUCKDUCKGO_PROTOCOL | "tavily")
+}
+
+/// 地址是不是该协议自己的服务。空表示用协议默认地址，也算自己的。
+fn search_url_is_own(protocol: &str, base_url: &str) -> bool {
+    let url = base_url.trim().to_ascii_lowercase();
+    if url.is_empty() {
+        return true;
+    }
+    match protocol {
+        DUCKDUCKGO_PROTOCOL => url.contains("duckduckgo"),
+        "tavily" => url.contains("tavily"),
+        _ => true,
+    }
+}
+
+/// 把串味的搜索档案还给真正对应的协议。
+///
+/// 搜索角色以前只有一个档案，切换协议会把上一个协议的连接信息留在原地，于是
+/// 免模型的协议里带着别人的地址与模型：`duckduckgo` 会拿着这个地址去抓别人
+/// 的站点，`tavily` 会把别的厂商的密钥发给自己的接口。读起来像对话式联网搜索的
+/// 档案整份归到 grok_search（地址/模型/密钥都跟着走），并给原协议补一个干净的
+/// 默认档案；只是多填了模型的则把模型清掉，因为那个字段对该协议没有意义。
+fn repair_search_profiles(config: &mut AppConfig) {
+    let mut missing: Vec<String> = Vec::new();
+    for profile in &mut config.model_profiles {
+        if profile.role != "search"
+            || search_uses_model(&profile.protocol)
+            || profile.model.trim().is_empty()
+        {
+            continue;
+        }
+        if search_url_is_own(&profile.protocol, &profile.base_url) {
+            profile.model.clear();
+            continue;
+        }
+        missing.push(profile.protocol.clone());
+        profile.protocol = SEARCH_MODEL_PROTOCOL.to_string();
+    }
+    // 端点由代码固定的协议不给用户留一个看不见的地址字段：
+    // 界面不显示它，留着就变成改不到的隐藏配置。
+    for profile in &mut config.model_profiles {
+        if profile.role == "search" && profile.protocol == DUCKDUCKGO_PROTOCOL {
+            profile.base_url.clear();
+        }
+    }
+    for protocol in missing {
+        if config
+            .model_profiles
+            .iter()
+            .any(|item| item.role == "search" && item.protocol == protocol)
+        {
+            continue;
+        }
+        let mut profile = default_search();
+        profile.id = free_search_profile_id(&config.model_profiles, &protocol);
+        profile.name = format!("Search model ({protocol})");
+        profile.protocol = protocol;
+        config.model_profiles.push(profile);
+    }
+}
+
+fn free_search_profile_id(profiles: &[ModelProfile], protocol: &str) -> String {
+    let base = format!("search-{protocol}");
+    if !profiles.iter().any(|item| item.id == base) {
+        return base;
+    }
+    (2..)
+        .map(|index| format!("{base}-{index}"))
+        .find(|id| !profiles.iter().any(|item| &item.id == id))
+        .expect("an unused search profile id")
 }
 
 fn normalize_proxy_url(proxy_url: Option<String>) -> Option<String> {
@@ -277,9 +378,9 @@ fn default_search() -> ModelProfile {
         id: "search-default".to_string(),
         role: "search".to_string(),
         name: "Search model".to_string(),
-        protocol: "duckduckgo_html".to_string(),
-        base_url: "https://duckduckgo.com".to_string(),
-        model: "duckduckgo-html".to_string(),
+        protocol: DUCKDUCKGO_PROTOCOL.to_string(),
+        base_url: String::new(),
+        model: String::new(),
         api_key: None,
         api_version: None,
         headers: serde_json::Map::new(),
@@ -342,5 +443,147 @@ fn default_implement() -> ModelProfile {
         output_defaults,
         has_api_key: Some(false),
         api_key_hint: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn search_profiles_migrate_the_old_openai_chat_protocol() {
+        let mut config = default_config();
+        config.model_profiles.push(ModelProfile {
+            role: "search".to_string(),
+            protocol: "openai_chat".to_string(),
+            ..default_search()
+        });
+        config.model_profiles.push(ModelProfile {
+            role: "design".to_string(),
+            protocol: "openai_chat".to_string(),
+            ..default_design()
+        });
+
+        let normalized = normalize_config(config, None);
+
+        assert!(normalized
+            .model_profiles
+            .iter()
+            .any(|profile| { profile.role == "search" && profile.protocol == "grok_search" }));
+        // 设计/制图角色的 openai_chat 不受影响。
+        assert!(normalized
+            .model_profiles
+            .iter()
+            .any(|profile| { profile.role == "design" && profile.protocol == "openai_chat" }));
+    }
+
+    /// 一个串味的搜索档案：免模型的协议里带着对话式联网搜索的地址、模型与密钥。
+    fn polluted_search_profile() -> ModelProfile {
+        ModelProfile {
+            protocol: "duckduckgo".to_string(),
+            base_url: "https://grok.draem.me".to_string(),
+            model: "grok-build-0.1".to_string(),
+            api_key: Some("xai-secret".to_string()),
+            ..default_search()
+        }
+    }
+
+    #[test]
+    fn polluted_search_profiles_move_to_the_protocol_they_belong_to() {
+        let mut config = default_config();
+        config.model_profiles = vec![polluted_search_profile()];
+
+        let normalized = normalize_config(config, None);
+
+        let search: Vec<&ModelProfile> = normalized
+            .model_profiles
+            .iter()
+            .filter(|item| item.role == "search")
+            .collect();
+        let moved = search
+            .iter()
+            .find(|item| item.protocol == "grok_search")
+            .expect("the grok configuration moves over");
+        assert_eq!(moved.base_url, "https://grok.draem.me");
+        assert_eq!(moved.model, "grok-build-0.1");
+        assert_eq!(moved.api_key.as_deref(), Some("xai-secret"));
+        // 原协议补一个干净的默认档案，原来的档案 id 保持不变。
+        let fresh = search
+            .iter()
+            .find(|item| item.protocol == "duckduckgo")
+            .expect("the emptied protocol gets a fresh profile");
+        assert!(fresh.base_url.is_empty());
+        assert!(fresh.model.is_empty());
+        assert!(fresh.api_key.is_none());
+        assert_ne!(fresh.id, moved.id);
+        // 重跑一次不再产生新档案。
+        let again = normalize_config(normalized, None);
+        assert_eq!(
+            again
+                .model_profiles
+                .iter()
+                .filter(|item| item.role == "search")
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn search_profiles_keep_their_own_endpoint_and_drop_unused_models() {
+        let mut config = default_config();
+        config.model_profiles = vec![
+            // 自己的地址：只把模型清掉，地址与密钥原样留着。
+            ModelProfile {
+                protocol: "tavily".to_string(),
+                base_url: "https://api.tavily.com".to_string(),
+                model: "leftover".to_string(),
+                api_key: Some("tvly-key".to_string()),
+                ..default_search()
+            },
+            // 空地址表示用协议默认地址，同样只清模型。
+            ModelProfile {
+                id: "search-empty".to_string(),
+                protocol: "duckduckgo".to_string(),
+                base_url: String::new(),
+                model: "leftover".to_string(),
+                ..default_search()
+            },
+        ];
+
+        let normalized = normalize_config(config, None);
+
+        let tavily = normalized
+            .model_profiles
+            .iter()
+            .find(|item| item.protocol == "tavily")
+            .unwrap();
+        assert_eq!(tavily.base_url, "https://api.tavily.com");
+        assert_eq!(tavily.api_key.as_deref(), Some("tvly-key"));
+        assert!(tavily.model.is_empty());
+        let duck = normalized
+            .model_profiles
+            .iter()
+            .find(|item| item.protocol == "duckduckgo")
+            .unwrap();
+        assert!(duck.base_url.is_empty());
+        assert!(duck.model.is_empty());
+        assert_eq!(normalized.model_profiles.len(), 2);
+    }
+
+    #[test]
+    fn duckduckgo_profiles_drop_the_hidden_endpoint_and_the_old_name() {
+        let mut config = default_config();
+        config.model_profiles = vec![ModelProfile {
+            protocol: "duckduckgo_html".to_string(),
+            base_url: "https://duckduckgo.com".to_string(),
+            ..default_search()
+        }];
+
+        let normalized = normalize_config(config, None);
+
+        let duck = &normalized.model_profiles[0];
+        assert_eq!(duck.protocol, "duckduckgo");
+        // 端点由代码固定，界面不显示 URL，存量值也要清掉，免得藏着改不到。
+        assert!(duck.base_url.is_empty());
     }
 }

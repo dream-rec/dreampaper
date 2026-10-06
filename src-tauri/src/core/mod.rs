@@ -202,6 +202,11 @@ impl Core {
         jobs.get_job(id)
     }
 
+    /// 继续一个失败或已停止的任务：同一条记录重新跑，已完成的部分从缓存回放。
+    pub fn resume_job(&self, id: String) -> AppResult<JobRecord> {
+        JobService::new(&self.store).resume(&id)
+    }
+
     pub fn delete_job(&self, id: String) -> AppResult<()> {
         JobService::new(&self.store).delete(&self.app_data, &id)
     }
@@ -209,7 +214,11 @@ impl Core {
     /// Tag a finished job 优/良/差 (`good`/`fair`/`poor`), or clear the tag
     /// with `None`. Only jobs that reached implement have a case to tag.
     pub fn rate_job(&self, id: String, rating: Option<String>) -> AppResult<JobRecord> {
-        let parsed = match rating.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+        let parsed = match rating
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
             Some(value) => Some(memory::Rating::parse(value).ok_or_else(|| {
                 crate::error::AppError::new("invalid_rating", "评分只能是 good / fair / poor")
             })?),

@@ -80,13 +80,19 @@ fn run(mode: &str, directory: &Path) -> AppResult<Value> {
         .ok_or_else(|| AppError::new("ocr_probe_failed", "可执行文件路径无效"))?;
     let resources = if cfg!(target_os = "macos") {
         bin.join("../Resources")
+    } else if cfg!(target_os = "linux") {
+        // deb 布局：Tauri 把资源装在 /usr/lib/<productName>（tauri.conf.json 的
+        // "DreamPaper"），可执行文件与 sidecar 在 /usr/bin。名字写死是有意的：
+        // 门禁要断言包内布局，而不是跟着当前配置走。
+        bin.join("../lib/DreamPaper")
     } else {
         bin.to_path_buf()
     }
     .canonicalize()?;
     let location =
         crate::state::locate_sidecar(Some(executable.clone()), Some(resources.clone()), false);
-    let bundle = if cfg!(target_os = "macos") {
+    let bundle = if cfg!(target_os = "macos") || cfg!(target_os = "linux") {
+        // macOS 的根是 .app 内的 Contents，deb 的根是 /usr（/usr/bin 与 /usr/lib）。
         bin.join("..").canonicalize()?
     } else {
         bin.to_path_buf()

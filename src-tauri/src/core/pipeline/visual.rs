@@ -1,358 +1,124 @@
-use std::sync::OnceLock;
-
-use regex::Regex;
-use serde::{Deserialize, Serialize};
+//! 视觉素材检索：先让模型从资料里挑出值得检索真实外观的主体，再逐条联网查询，
+//! 把客观描述与来源链接作为纯文本线索交给制图阶段。
 
 use crate::core::config::ModelProfile;
+use crate::core::pipeline::cache::{AnswerCache, StepCache};
+use crate::core::pipeline::runner::DesignCall;
 use crate::core::prompt::PromptStore;
-use crate::core::search::{SearchClient, SearchResult};
-use crate::error::{AppError, AppResult};
+use crate::core::search::{
+    filter_results, SearchClient, SearchResult, SearchTrace, GROK_SEARCH_PROTOCOL,
+};
+use crate::error::AppResult;
+use crate::event::{DesignLog, DesignSink};
 
 pub const VISUAL_ASSET_SEARCH_TERM_LIMIT: usize = 8;
 pub const VISUAL_ASSET_SEARCH_RESULT_LIMIT: usize = 3;
+pub const VISUAL_CONTEXT_LIMIT: usize = 8192;
 const MATERIAL_TEXT_LIMIT: usize = 6000;
 
-pub const VISUAL_TERMS_KEY: &str = "global/visual_terms.json";
-const EMBEDDED_VISUAL_TERMS: &str = include_str!("../../../../prompts/global/visual_terms.json");
+/// 识别主体的提示词资源；哪些词值得检索由模型读资料自己判断，不再维护主体词库。
+pub const VISUAL_SUBJECTS_KEY: &str = "global/visual_subjects.md";
 
-// Categories whose search should target a brand mark rather than a physical object.
-const LOGO_CATEGORIES: &[&str] = &[
-    "vendor",
-    "model",
-    "tool",
-    "cloud",
-    "infra",
-    "database",
-    "software",
-    "robot_vendor",
-];
-const OBJECT_CATEGORIES: &[&str] = &["robot", "sensor", "chip", "instrument"];
+/// 缓存作用域：识别主体与逐条检索各一个，不跟设计步骤混在一起。
+const SUBJECTS_SCOPE: &str = "visual_subjects";
+const SEARCH_SCOPE: &str = "visual_search";
 
-#[derive(Clone, Debug, Deserialize)]
-pub struct VisualTerm {
-    pub term: String,
-    pub brand: String,
-    // Tolerated when absent (like the Python loader); an empty category just keeps the legacy query.
-    #[serde(default)]
-    pub category: String,
-    #[serde(default)]
-    pub aliases: Vec<String>,
+/// 一次检索的缓存内容：源文本加发出去的报文，重跑时日志也能一模一样地重建。
+#[derive(serde::Deserialize, serde::Serialize)]
+struct CachedSearch {
+    request: Option<String>,
+    response: Option<String>,
+    results: Vec<SearchResult>,
 }
 
-#[derive(Deserialize)]
-struct VisualTermsFile {
-    version: u64,
-    entries: Vec<VisualTerm>,
-}
-
-#[derive(Clone, Debug)]
-enum TermPattern {
-    Latin(Regex),
-    Cjk(String),
-}
-
-#[derive(Clone, Debug)]
-struct TermMatcher {
-    entry: usize,
-    pattern: TermPattern,
-}
-
-/// Parsed vocabulary with one precompiled matcher per term/alias string.
-#[derive(Clone, Debug)]
-pub struct VisualTerms {
-    entries: Vec<VisualTerm>,
-    matchers: Vec<TermMatcher>,
-}
-
-/// One extracted subject. Vocabulary hits carry brand/category/matched; heuristic hits leave them `None`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct VisualHit {
-    pub term: String,
-    pub brand: Option<String>,
-    pub category: Option<String>,
-    pub matched: Option<String>,
-    pub position: usize,
-}
-
-impl VisualTerms {
-    pub fn parse(json: &str) -> AppResult<Self> {
-        let file: VisualTermsFile = serde_json::from_str(json).map_err(|error| {
-            AppError::new(
-                "visual_terms_invalid",
-                format!("visual_terms.json is not valid JSON: {error}"),
-            )
-        })?;
-        if file.version != 1 {
-            return Err(AppError::new(
-                "visual_terms_invalid",
-                format!(
-                    "visual_terms.json version {} is not supported",
-                    file.version
-                ),
-            ));
-        }
-        if file.entries.is_empty() {
-            return Err(AppError::new(
-                "visual_terms_invalid",
-                "visual_terms.json has no entries",
-            ));
-        }
-        let mut matchers = Vec::new();
-        for (index, entry) in file.entries.iter().enumerate() {
-            if entry.term.trim().is_empty() || entry.brand.trim().is_empty() {
-                return Err(AppError::new(
-                    "visual_terms_invalid",
-                    format!("visual_terms.json entry {index} needs a non-empty term and brand"),
-                ));
-            }
-            for alias in std::iter::once(&entry.term).chain(entry.aliases.iter()) {
-                if alias.trim().is_empty() {
-                    return Err(AppError::new(
-                        "visual_terms_invalid",
-                        format!("visual_terms.json entry {} has an empty alias", entry.term),
-                    ));
-                }
-                matchers.push(TermMatcher {
-                    entry: index,
-                    pattern: build_term_pattern(alias)?,
-                });
-            }
-        }
-        Ok(Self {
-            entries: file.entries,
-            matchers,
-        })
+/// 让模型挑出这份资料里值得检索真实外观的主体。
+///
+/// 内部固定流程：不写设计日志、不单独占一个阶段。识别失败、提示词缺失或没有可用主体时
+/// 返回空列表，检索阶段随之降级（图照画，只是没有客观外观描述可依）。
+pub async fn pick_visual_subjects(
+    material: &str,
+    design_profile: &ModelProfile,
+    prompts: &PromptStore,
+    proxy_url: Option<&str>,
+    cache: Option<&AnswerCache>,
+) -> Vec<String> {
+    let text: String = material.chars().take(MATERIAL_TEXT_LIMIT).collect();
+    if text.trim().is_empty() {
+        return Vec::new();
     }
-
-    pub fn embedded() -> &'static VisualTerms {
-        static EMBEDDED: OnceLock<VisualTerms> = OnceLock::new();
-        EMBEDDED.get_or_init(|| {
-            VisualTerms::parse(EMBEDDED_VISUAL_TERMS)
-                .expect("embedded prompts/global/visual_terms.json must be valid")
-        })
+    let Ok(prompt) = prompts.load(VISUAL_SUBJECTS_KEY) else {
+        return Vec::new();
+    };
+    let reply = DesignCall {
+        profile: design_profile,
+        system_prompt: &prompt.content,
+        user_prompt: &text,
+        images: &[],
+        proxy_url,
+        response_sink: None,
+        log: None,
+        cache: cache.map(|cache| StepCache {
+            cache,
+            scope: SUBJECTS_SCOPE,
+        }),
     }
-
-    /// External `prompts/` directory wins; any read or parse problem falls back to the embedded
-    /// vocabulary so a broken override never fails the job.
-    pub fn from_store(store: &PromptStore) -> VisualTerms {
-        match store.load(VISUAL_TERMS_KEY) {
-            Ok(asset) if asset.content != EMBEDDED_VISUAL_TERMS => {
-                VisualTerms::parse(&asset.content).unwrap_or_else(|_| Self::embedded().clone())
-            }
-            _ => Self::embedded().clone(),
-        }
-    }
-
-    pub fn find(&self, text: &str) -> Vec<VisualHit> {
-        // Per entry keep the longest matched string (char count, like Python's len()).
-        let mut best: Vec<Option<(String, usize)>> = vec![None; self.entries.len()];
-        for matcher in &self.matchers {
-            let found = match &matcher.pattern {
-                TermPattern::Latin(regex) => regex
-                    .captures(text)
-                    .and_then(|caps| caps.get(1))
-                    .map(|group| (group.as_str().to_string(), group.start())),
-                TermPattern::Cjk(alias) => {
-                    text.find(alias.as_str()).map(|pos| (alias.clone(), pos))
-                }
-            };
-            let Some((matched, position)) = found else {
-                continue;
-            };
-            let slot = &mut best[matcher.entry];
-            let longer = slot
-                .as_ref()
-                .is_none_or(|(current, _)| matched.chars().count() > current.chars().count());
-            if longer {
-                *slot = Some((matched, position));
-            }
-        }
-
-        let candidates: Vec<(usize, String, usize)> = best
-            .into_iter()
-            .enumerate()
-            .filter_map(|(index, slot)| slot.map(|(matched, position)| (index, matched, position)))
-            .collect();
-        let lowered: Vec<String> = candidates
-            .iter()
-            .map(|(_, matched, _)| matched.to_lowercase())
-            .collect();
-        let mut hits: Vec<VisualHit> = candidates
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| {
-                // Longest match across entries: drop a hit whose matched string is a proper
-                // substring of another hit's matched string (`Unitree` loses to `Unitree G1`).
-                !lowered.iter().enumerate().any(|(j, other)| {
-                    j != *i && other != &lowered[*i] && other.contains(lowered[*i].as_str())
-                })
-            })
-            .map(|(_, (index, matched, position))| {
-                let entry = &self.entries[*index];
-                VisualHit {
-                    term: entry.term.clone(),
-                    brand: Some(entry.brand.clone()),
-                    category: Some(entry.category.clone()),
-                    matched: Some(matched.clone()),
-                    position: *position,
-                }
-            })
-            .collect();
-        hits.sort_by_key(|hit| hit.position);
-        hits
+    .first()
+    .await;
+    match reply {
+        Ok(reply) => visual_subjects_from_reply(&reply, &text),
+        Err(_) => Vec::new(),
     }
 }
 
-fn has_cjk(text: &str) -> bool {
+/// 模型可能把数组包在代码块或一句说明里，取第一个 JSON 数组。
+///
+/// 候选必须真的出现在资料原文里（大小写、空格、标点不计），这样模型无法凭记忆塞进来
+/// 一个原文没提过的品牌——顺带保证字体、色值这类约束描述不会被当成视觉主体。
+fn visual_subjects_from_reply(reply: &str, material: &str) -> Vec<String> {
+    let (Some(start), Some(end)) = (reply.find('['), reply.rfind(']')) else {
+        return Vec::new();
+    };
+    let Ok(items) = serde_json::from_str::<Vec<serde_json::Value>>(&reply[start..=end]) else {
+        return Vec::new();
+    };
+
+    let haystack = compact(material);
+    let mut seen: Vec<String> = Vec::new();
+    let mut subjects: Vec<String> = Vec::new();
+    for item in items {
+        let Some(candidate) = item.as_str() else {
+            continue;
+        };
+        let subject = candidate.trim();
+        let key = compact(subject);
+        if key.is_empty() || !haystack.contains(&key) || seen.contains(&key) {
+            continue;
+        }
+        seen.push(key);
+        subjects.push(subject.to_string());
+        if subjects.len() >= VISUAL_ASSET_SEARCH_TERM_LIMIT {
+            break;
+        }
+    }
+    subjects
+}
+
+/// 只留字母数字并折叠大小写：`Grok Bot` 与原文 `grokbot` 视为同一个主体。
+fn compact(text: &str) -> String {
     text.chars()
-        .any(|ch| ('\u{4e00}'..='\u{9fff}').contains(&ch))
+        .flat_map(|ch| ch.to_lowercase())
+        .filter(|ch| ch.is_alphanumeric())
+        .collect()
 }
 
-/// Latin strings match on ASCII alphanumeric boundaries (`\b` treats CJK as `\w`, so
-/// `PyTorch框架` would miss); all-caps acronyms stay case-sensitive so `robot arm` never hits `ARM`.
-fn build_term_pattern(alias: &str) -> AppResult<TermPattern> {
-    if has_cjk(alias) {
-        return Ok(TermPattern::Cjk(alias.to_string()));
-    }
-    let body = alias
-        .split_whitespace()
-        .map(regex::escape)
-        .collect::<Vec<_>>()
-        .join(r"\s+");
-    let compact = alias.replace(' ', "");
-    let all_caps = !compact.is_empty()
-        && compact
-            .chars()
-            .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit());
-    let flags = if all_caps { "" } else { "(?i)" };
-    Regex::new(&format!(
-        "{flags}(?:^|[^A-Za-z0-9])({body})(?:[^A-Za-z0-9]|$)"
-    ))
-    .map(TermPattern::Latin)
-    .map_err(|error| {
-        AppError::new(
-            "visual_terms_invalid",
-            format!("visual_terms.json alias {alias:?} is not matchable: {error}"),
-        )
-    })
-}
-
-const CN_SUFFIXES: &[&str] = &[
-    "无人机",
-    "机器人",
-    "机械臂",
-    "传感器",
-    "反应釜",
-    "培养皿",
-    "培养箱",
-    "显微镜",
-    "光谱仪",
-    "离心机",
-    "示波器",
-    "激光器",
-    "发动机",
-    "换热器",
-    "催化剂",
-    "电解槽",
-    "晶圆",
-    "芯片",
-    "电极",
-    "电池",
-    "薄膜",
-    "涂层",
-    "探头",
-    "模组",
-    "阵列",
-    "支架",
-    "导管",
-    "样机",
-    "样品",
-    "试剂",
-    "装置",
-    "设备",
-    "仪器",
-    "机床",
-    "产线",
-    "车间",
-    "卫星",
-    "雷达",
-    "天线",
-    "车辆",
-    "船舶",
-    "飞行器",
-];
-
-const TERM_STOPWORDS: &[&str] = &[
-    "A",
-    "An",
-    "And",
-    "Body",
-    "Card",
-    "Create",
-    "Data",
-    "Figure",
-    "Flow",
-    "Input",
-    "Material",
-    "Model",
-    "Output",
-    "Page",
-    "Prompt",
-    "Result",
-    "Slide",
-    "Template",
-    "The",
-    "Use",
-    "User",
-    "Bayes",
-    "Bayesian",
-    "Banach",
-    "Cauchy",
-    "Euler",
-    "Fourier",
-    "Gauss",
-    "Gaussian",
-    "Hessian",
-    "Hilbert",
-    "Jacobian",
-    "Lagrange",
-    "Laplace",
-    "Lipschitz",
-    "Lyapunov",
-    "Markov",
-    "Monte Carlo",
-    "Nash",
-    "Newton",
-    "Pareto",
-    "Poisson",
-    "Taylor",
-    "Bernoulli",
-    "Frobenius",
-    "Kullback",
-    "Leibler",
-    "Wasserstein",
-];
-
-const BOUNDARY_CHARS: &str =
-    "对与和及或的了在从由被把将用以为并中后前时上下等则若使可将其该本此这那每各";
-
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct VisualAssetItem {
     pub term: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub brand: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub category: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub matched: Option<String>,
-    pub query: String,
     pub results: Vec<SearchResult>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
     pub provider: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct VisualAssetContext {
     pub enabled: bool,
     pub degraded: bool,
@@ -361,212 +127,31 @@ pub struct VisualAssetContext {
     pub message: String,
 }
 
-/// Canonical terms only; the pipeline itself consumes `extract_visual_asset_hits`.
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn extract_visual_asset_terms(material: &str, vocabulary: &VisualTerms) -> Vec<String> {
-    extract_visual_asset_hits(material, vocabulary)
-        .into_iter()
-        .map(|hit| hit.term)
-        .collect()
+/// 一次检索的结果：来自缓存（连同当时的报文）或刚刚发出的请求。
+enum SearchOutcome {
+    Cached(CachedSearch),
+    Live {
+        trace: SearchTrace,
+        results: AppResult<Vec<SearchResult>>,
+    },
 }
 
-/// Vocabulary hits (by first occurrence) followed by heuristic candidates that the vocabulary
-/// does not already cover, capped at `VISUAL_ASSET_SEARCH_TERM_LIMIT`.
-pub fn extract_visual_asset_hits(material: &str, vocabulary: &VisualTerms) -> Vec<VisualHit> {
-    let text: String = material.chars().take(MATERIAL_TEXT_LIMIT).collect();
-    let vocabulary_hits = vocabulary.find(&text);
-
-    let candidates: Vec<String> = heuristic_candidates(&text)
-        .into_iter()
-        .filter(|candidate| !covered_by_vocabulary(candidate, &vocabulary_hits))
-        .collect();
-    // Normalization inside dedupe_terms can fold a candidate onto a vocabulary term
-    // (`PyTorch框架` -> `PyTorch`), so the coverage check runs again afterwards.
-    let heuristic: Vec<VisualHit> = dedupe_terms(&candidates)
-        .into_iter()
-        .filter(|term| !covered_by_vocabulary(term, &vocabulary_hits))
-        .map(|term| VisualHit {
-            position: text.find(term.as_str()).unwrap_or(text.len()),
-            term,
-            brand: None,
-            category: None,
-            matched: None,
-        })
-        .collect();
-
-    let mut hits = vocabulary_hits;
-    hits.extend(heuristic);
-    hits.truncate(VISUAL_ASSET_SEARCH_TERM_LIMIT);
-    hits
-}
-
-/// A heuristic candidate is redundant when it equals or is a fragment of a vocabulary hit's
-/// matched string / canonical term (`GLM-4.5` vs `Zhipu`), or when it contains that string as a
-/// whole word (`ARM Cortex-A78` vs `ARM`; but `Spectrum` is not covered by `CT`).
-fn covered_by_vocabulary(candidate: &str, hits: &[VisualHit]) -> bool {
-    let normalized = normalize_for_coverage(candidate);
-    hits.iter().any(|hit| {
-        hit.matched
-            .as_deref()
-            .into_iter()
-            .chain(std::iter::once(hit.term.as_str()))
-            .map(normalize_for_coverage)
-            .any(|known| known.contains(normalized.as_str()) || contains_word(&normalized, &known))
-    })
-}
-
-fn contains_word(haystack: &str, needle: &str) -> bool {
-    haystack.match_indices(needle).any(|(start, found)| {
-        let before = haystack[..start].chars().next_back();
-        let after = haystack[start + found.len()..].chars().next();
-        !before.is_some_and(|ch| ch.is_ascii_alphanumeric())
-            && !after.is_some_and(|ch| ch.is_ascii_alphanumeric())
-    })
-}
-
-fn normalize_for_coverage(text: &str) -> String {
-    text.split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase()
-}
-
-fn heuristic_candidates(text: &str) -> Vec<String> {
-    let suffix_group = CN_SUFFIXES
-        .iter()
-        .map(|suffix| regex::escape(suffix))
-        .collect::<Vec<_>>()
-        .join("|");
-    let cn_pattern = Regex::new(&format!(
-        r"[\x{{4e00}}-\x{{9fff}}--[{BOUNDARY_CHARS}]]{{0,4}}(?:{suffix_group})"
-    ))
-    .expect("valid regex");
-    let mut chinese: Vec<String> = cn_pattern
-        .find_iter(text)
-        .map(|m| m.as_str().to_string())
-        .collect();
-    chinese.sort_by_key(|term| std::cmp::Reverse(text.matches(term.as_str()).count()));
-
-    let mut english: Vec<String> = Vec::new();
-    for pattern in [
-        r"\b[A-Z][A-Za-z0-9.+#-]{1,}(?:\s+[A-Z0-9][A-Za-z0-9.+#-]{1,}){0,2}\b",
-        r"\b[A-Z]{2,}(?:[-\s][A-Z0-9]{2,}){0,2}\b",
-    ] {
-        let regex = Regex::new(pattern).expect("valid regex");
-        english.extend(regex.find_iter(text).map(|m| m.as_str().to_string()));
-    }
-
-    chinese.extend(english);
-    chinese
-}
-
-fn dedupe_terms(candidates: &[String]) -> Vec<String> {
-    let quantifier =
-        Regex::new(r"^[一二三四五六七八九十百千两0-9]+[套台个批组种类款部只条张片辆架]")
-            .expect("valid regex");
-    let determiner =
-        Regex::new(r"^(?:该|本|其|此|这|那|各|每|所述|上述|相应|对应)").expect("valid regex");
-    let category = Regex::new(r"\s*(平台|工具|框架|模型|软件|系统|设备)$").expect("valid regex");
-    let latin = Regex::new(r"[A-Za-z]").expect("valid regex");
-    let spaces = Regex::new(r"\s+").expect("valid regex");
-    let stopwords: Vec<String> = TERM_STOPWORDS.iter().map(|s| s.to_lowercase()).collect();
-
-    let mut normalized: Vec<String> = Vec::new();
-    let mut seen: Vec<String> = Vec::new();
-
-    for candidate in candidates {
-        let mut term = spaces
-            .replace_all(candidate, " ")
-            .trim_matches(|ch: char| " ,.;:()[]{}<>，。；：（）【】".contains(ch))
-            .to_string();
-        term = quantifier.replace(&term, "").to_string();
-        term = determiner.replace(&term, "").trim().to_string();
-        let stripped = category.replace(&term, "").trim().to_string();
-        if !stripped.is_empty() && stripped != term && latin.is_match(&stripped) {
-            term = stripped;
-        }
-        let length = term.chars().count();
-        if !(2..=48).contains(&length) {
-            continue;
-        }
-        let key = term.to_lowercase();
-        if stopwords.contains(&key) || seen.contains(&key) {
-            continue;
-        }
-        seen.push(key);
-        normalized.push(term);
-    }
-
-    let mut terms: Vec<String> = Vec::new();
-    for term in &normalized {
-        if normalized
-            .iter()
-            .any(|other| other != term && term.contains(other.as_str()))
-        {
-            continue;
-        }
-        terms.push(term.clone());
-        if terms.len() >= VISUAL_ASSET_SEARCH_TERM_LIMIT {
-            break;
-        }
-    }
-    terms
-}
-
-/// Logo-type categories search for the brand mark; object-type categories for the product
-/// appearance. Unknown/absent categories keep the legacy sentences.
-pub fn visual_asset_search_query(
-    term: &str,
-    brand: Option<&str>,
-    category: Option<&str>,
-) -> String {
-    let brand = brand
-        .map(str::trim)
-        .filter(|brand| !brand.is_empty() && brand.to_lowercase() != term.to_lowercase());
-    let is_logo = category.is_some_and(|category| LOGO_CATEGORIES.contains(&category));
-    let is_object = category.is_some_and(|category| OBJECT_CATEGORIES.contains(&category));
-
-    if has_cjk(term) {
-        let subject = match brand {
-            Some(brand) => format!("{term} {brand}"),
-            None => term.to_string(),
-        };
-        if is_logo {
-            format!("{subject} 官方logo 品牌标识 视觉描述")
-        } else {
-            format!("{subject} 实物外观 外形结构 产品图片 特征描述")
-        }
-    } else {
-        let subject = match brand {
-            Some(brand) => format!("{brand} {term}"),
-            None => term.to_string(),
-        };
-        if is_logo {
-            format!("{subject} official logo brand mark visual description")
-        } else if is_object {
-            format!("{subject} product appearance what it looks like visual description")
-        } else {
-            format!("{term} official logo product appearance what it looks like visual description")
-        }
-    }
-}
-
+/// 逐主体检索，每个主体一次查询，报文与原始返回先写进设计日志再决定冒泡还是降级。
 pub async fn build_visual_asset_context(
-    material: &str,
-    vocabulary: &VisualTerms,
+    subjects: &[String],
     search_profile: &ModelProfile,
     proxy_url: Option<&str>,
-) -> VisualAssetContext {
-    let hits = extract_visual_asset_hits(material, vocabulary);
-    let terms: Vec<String> = hits.iter().map(|hit| hit.term.clone()).collect();
-    if terms.is_empty() {
-        return VisualAssetContext {
+    design_log: DesignSink<'_>,
+    cache: Option<&AnswerCache>,
+) -> AppResult<VisualAssetContext> {
+    if subjects.is_empty() {
+        return Ok(VisualAssetContext {
             enabled: true,
             degraded: true,
             terms: Vec::new(),
             items: Vec::new(),
             message: "No explicit product/tool/equipment terms were detected.".to_string(),
-        };
+        });
     }
 
     let max_results = search_profile
@@ -580,101 +165,186 @@ pub async fn build_visual_asset_context(
         .unwrap_or(VISUAL_ASSET_SEARCH_RESULT_LIMIT as u64)
         .clamp(1, 8) as usize;
 
-    let futures = hits.iter().map(|hit| async move {
-        let query =
-            visual_asset_search_query(&hit.term, hit.brand.as_deref(), hit.category.as_deref());
-        let (results, error) =
-            match SearchClient::search(search_profile, &query, max_results, proxy_url).await {
-                Ok(results) => (results, None),
-                Err(error) => (Vec::new(), Some(error.message)),
-            };
-        VisualAssetItem {
-            term: hit.term.clone(),
-            brand: hit.brand.clone(),
-            category: hit.category.clone(),
-            matched: hit.matched.clone(),
-            query,
-            results,
-            error,
-            provider: search_profile.protocol.clone(),
+    let futures = subjects.iter().map(|subject| async move {
+        // 逐条检索也缓存：上一次跑到一半失败时搜到的东西不该再买一遍。
+        let step = cache.map(|cache| StepCache {
+            cache,
+            scope: SEARCH_SCOPE,
+        });
+        let key = step.map(|step| {
+            let identity = format!(
+                "{}|{}|{}|{max_results}",
+                search_profile.protocol, search_profile.base_url, search_profile.model
+            );
+            step.key(&[identity.as_bytes(), subject.as_bytes()])
+        });
+        if let (Some(step), Some(key)) = (step, key.as_deref()) {
+            if let Some(cached) = step
+                .text(key)
+                .and_then(|text| serde_json::from_str::<CachedSearch>(&text).ok())
+            {
+                return (subject, SearchOutcome::Cached(cached));
+            }
         }
+        let outcome = SearchClient::search(search_profile, subject, max_results, proxy_url).await;
+        if let (Some(step), Some(key), Ok(results)) = (step, key.as_deref(), &outcome.results) {
+            let entry = CachedSearch {
+                request: outcome.trace.request.clone(),
+                response: outcome.trace.response.clone(),
+                results: results.clone(),
+            };
+            if let Ok(text) = serde_json::to_string(&entry) {
+                step.put_text(key, &text);
+            }
+        }
+        (
+            subject,
+            SearchOutcome::Live {
+                trace: outcome.trace,
+                results: outcome.results,
+            },
+        )
     });
-    let items: Vec<VisualAssetItem> = futures::future::join_all(futures).await;
+    let outcomes = futures::future::join_all(futures).await;
+    // 每次检索实际发出去的报文与原始返回都写进设计日志（界面按流程顺序展示）。
+    // 先记再抛：grok 失败会让任务失败，但失败的那次调用同样要能复盘。
+    for (index, (subject, outcome)) in outcomes.iter().enumerate() {
+        let number = index + 1;
+        let (trace, ok) = match outcome {
+            SearchOutcome::Cached(cached) => (
+                SearchTrace {
+                    request: cached.request.clone(),
+                    response: cached.response.clone(),
+                },
+                true,
+            ),
+            SearchOutcome::Live { trace, results } => (trace.clone(), results.is_ok()),
+        };
+        if let Some(request) = &trace.request {
+            design_log(DesignLog::End {
+                step: &format!("search_request_{number}"),
+                label: &format!("联网查询 {number} · {subject}"),
+                text: request,
+                ok,
+            });
+        }
+        if let Some(response) = &trace.response {
+            design_log(DesignLog::End {
+                step: &format!("search_response_{number}"),
+                label: &format!("联网查询 {number} · {subject}"),
+                text: response,
+                ok,
+            });
+        }
+    }
+    let mut items = Vec::with_capacity(outcomes.len());
+    for (subject, outcome) in outcomes {
+        // 检索失败就是失败：路由、鉴权、限流、反爬页都得让任务看见。
+        // 降级成“没有来源”会把基础设施问题伪装成“这个主体查不到”，
+        // 用户既看不到原因，还会拿着一份没有依据的图继续跑完。
+        // 报文已经先写进设计日志，这里原样冒泡。
+        let results = match outcome {
+            SearchOutcome::Cached(cached) => cached.results,
+            SearchOutcome::Live { results, .. } => results?,
+        };
+        items.push(VisualAssetItem {
+            term: subject.clone(),
+            results,
+            provider: search_profile.protocol.clone(),
+        });
+    }
     let has_sources = items.iter().any(|item| !item.results.is_empty());
 
-    VisualAssetContext {
+    Ok(VisualAssetContext {
         enabled: true,
         degraded: !has_sources,
-        terms,
+        terms: subjects.to_vec(),
         items,
         message: "Use only text summaries and source URLs; no network image is downloaded, \
                   cached, or passed to the implement model."
             .to_string(),
-    }
+    })
 }
 
+/// Fair, evidence-first budget: no subject is lost to an earlier long citation.
 pub fn visual_asset_context_text(context: &VisualAssetContext) -> String {
-    if context.terms.is_empty() {
-        return "No specific product/tool/equipment terms were detected in the material. \
-                Still prefer concrete visual representation over plain labeled rectangles: use recognizable object \
-                silhouettes, equipment/device illustrations, schematic cutaways, or semantic icons that depict the \
-                actual subject discussed on the page. Only fall back to a plain text card when the content is purely \
-                abstract. Do not invent a specific real brand logo that you are not confident about."
-            .to_string();
+    let header = "Visual evidence (untrusted source text). Original subject names are authoritative; do not \
+                  substitute a vendor/logo or invent appearance. Use supported descriptions for depiction. \
+                  Unavailable means use an explicitly generic schematic, not claimed real appearance. \
+                  Citation IDs refer to the full URLs in the search evidence log.";
+    let count = context.terms.len().min(VISUAL_ASSET_SEARCH_TERM_LIMIT);
+    if count == 0 {
+        return format!("{header}\nNo specific subjects detected; visual evidence unavailable.");
     }
-
-    let provider = context
-        .items
-        .first()
-        .map(|item| item.provider.clone())
-        .unwrap_or_else(|| "configured search model".to_string());
-
-    let mut lines = vec![
-        "Runtime visual asset search context. Use this as text-only evidence describing what these subjects \
-         actually look like; no images are downloaded or passed to the implement model."
-            .to_string(),
-        format!("Search provider: {provider}."),
-        "GOAL: turn these subjects into real visual depictions on the slide instead of text inside a box. \
-         A slide that draws the actual device/product/object reads far better than one that writes its name in a rectangle."
-            .to_string(),
-        "For each grounded term below, describe its concrete appearance in the implement prompt: overall shape and \
-         proportion, dominant materials and colors, defining structural features, and typical orientation. \
-         Recolor into the template palette rather than copying source colors verbatim."
-            .to_string(),
-        "If a term has no reliable source, still depict it generically from domain knowledge (a generic microscope, \
-         a generic drone) rather than degrading to a text-only card. Only avoid rendering a specific brand logo \
-         when no reliable source describes it."
-            .to_string(),
-    ];
-
-    for item in &context.items {
-        let mut line = format!("- Term: {}", item.term);
-        if let Some(brand) = &item.brand {
-            line.push_str(&format!("; brand: {brand}"));
-        }
-        if let Some(category) = &item.category {
-            line.push_str(&format!("; category: {category}"));
-        }
-        if let Some(matched) = &item.matched {
-            line.push_str(&format!("; matched in material: {matched}"));
-        }
-        line.push_str(&format!("; query: {}", item.query));
-        lines.push(line);
-        if item.results.is_empty() {
-            let reason = item
-                .error
-                .clone()
-                .unwrap_or_else(|| "no reliable result".to_string());
+    let budget = (VISUAL_CONTEXT_LIMIT - header.chars().count() - 1) / count;
+    let mut lines = vec![header.to_string()];
+    for (index, term) in context.terms.iter().take(count).enumerate() {
+        let item = context.items.get(index);
+        let name = item.map(|item| item.term.as_str()).unwrap_or(term);
+        let label = format!(
+            "- Subject: {}\n",
+            name.chars().take(budget / 4).collect::<String>()
+        );
+        let results = item
+            .map(|item| filter_results(item.results.clone(), usize::MAX))
+            .unwrap_or_default();
+        if results.is_empty() {
             lines.push(format!(
-                "  Source status: {reason}. Depict this subject generically from domain knowledge; \
-                 avoid brand-specific marks."
+                "{label}  Visual evidence unavailable. No supported description/citation."
             ));
             continue;
         }
-        for result in &item.results {
+        let per_source = (budget - label.chars().count() - 1)
+            / results.len().min(VISUAL_ASSET_SEARCH_RESULT_LIMIT);
+        let mut sources = Vec::new();
+        for (source_index, result) in results
+            .iter()
+            .take(VISUAL_ASSET_SEARCH_RESULT_LIMIT)
+            .enumerate()
+        {
+            let citation = format!("[{}.{}]", index + 1, source_index + 1);
+            let description = result
+                .snippet
+                .chars()
+                .take((per_source / 2).max(1))
+                .collect::<String>();
+            let prefix = format!("  {citation} {description}\n  Source: ");
+            let remaining = per_source.saturating_sub(prefix.chars().count() + 1);
+            let reference = if result.url.chars().count() <= remaining {
+                result.url.clone()
+            } else {
+                format!("{citation} (full URL in search log)")
+            };
+            sources.push(format!("{prefix}{reference}"));
+        }
+        lines.push(format!("{label}{}", sources.join("\n")));
+    }
+    lines.join("\n")
+}
+
+/// Persist complete filtered descriptions/citations outside the planner's bounded context.
+pub fn visual_asset_log_text(context: &VisualAssetContext) -> String {
+    let mut lines = vec![
+        visual_asset_context_text(context),
+        "\nFull source references:".to_string(),
+    ];
+    for (index, item) in context
+        .items
+        .iter()
+        .take(VISUAL_ASSET_SEARCH_TERM_LIMIT)
+        .enumerate()
+    {
+        for (source_index, result) in filter_results(item.results.clone(), usize::MAX)
+            .iter()
+            .enumerate()
+        {
             lines.push(format!(
-                "  Source: {} | {} | {}",
-                result.title, result.url, result.snippet
+                "[{}.{}] {} | {} | {}",
+                index + 1,
+                source_index + 1,
+                result.snippet,
+                result.title,
+                result.url
             ));
         }
     }
@@ -685,277 +355,347 @@ pub fn visual_asset_context_text(context: &VisualAssetContext) -> String {
 mod tests {
     use super::*;
 
-    fn vocabulary() -> &'static VisualTerms {
-        VisualTerms::embedded()
+    fn subjects(reply: &str, material: &str) -> Vec<String> {
+        visual_subjects_from_reply(reply, material)
     }
 
-    fn extract(material: &str) -> Vec<String> {
-        extract_visual_asset_terms(material, vocabulary())
+    fn search_profile(protocol: &str) -> ModelProfile {
+        // 不带 api_key：检索请求在发出去之前就会失败，测试不依赖真实网络。
+        serde_json::from_value(serde_json::json!({
+            "id": "search", "role": "search", "name": "Search", "protocol": protocol,
+            "base_url": "https://example.test/v1", "model": "Build/deployed-model",
+            "headers": {}, "max_retries": 0, "output_defaults": {}
+        }))
+        .unwrap()
     }
 
-    fn found_terms(text: &str) -> Vec<String> {
-        vocabulary()
-            .find(text)
-            .into_iter()
-            .map(|hit| hit.term)
-            .collect()
-    }
-
-    fn assert_terms(actual: &[String], expected: &[&str], absent: &[&str]) {
-        for term in expected {
-            assert!(
-                actual.iter().any(|t| t == term),
-                "missing {term}: {actual:?}"
-            );
+    fn context(subjects: &[&str], results: Vec<SearchResult>) -> VisualAssetContext {
+        VisualAssetContext {
+            enabled: true,
+            degraded: results.is_empty(),
+            terms: subjects.iter().map(|term| term.to_string()).collect(),
+            items: subjects
+                .iter()
+                .map(|term| VisualAssetItem {
+                    term: term.to_string(),
+                    results: results.clone(),
+                    provider: "grok_search".to_string(),
+                })
+                .collect(),
+            message: String::new(),
         }
-        for term in absent {
-            assert!(
-                !actual.iter().any(|t| t == term),
-                "unexpected {term}: {actual:?}"
-            );
+    }
+
+    #[test]
+    fn subjects_keep_the_spelling_of_the_material() {
+        let material = "本方案用 muse 与 dots 两个模型，部署在 Kubernetes 上。";
+        assert_eq!(
+            subjects("[\"muse\", \"dots\", \"Kubernetes\"]", material),
+            vec!["muse", "dots", "Kubernetes"]
+        );
+        // 模型把名字规范化了也算命中：比对时忽略大小写、空格与标点。
+        assert_eq!(
+            subjects(
+                "```json\n[\"Grok Bot\", \"dots.llm1\"]\n```",
+                "介绍 grokbot 和 dots.llm1"
+            ),
+            vec!["Grok Bot", "dots.llm1"]
+        );
+    }
+
+    #[test]
+    fn subjects_absent_from_the_material_are_dropped() {
+        // 识别只看资料原文：约束里的字体与色值不在其中，因此模型就算报也入不了检索。
+        let material = "图中展示 Grok Bot 的界面。";
+        assert_eq!(
+            subjects(
+                "[\"Microsoft\", \"FFFFFF\", \"微软雅黑\", \"Grok Bot\"]",
+                material
+            ),
+            vec!["Grok Bot"]
+        );
+        assert!(subjects("[\"OpenAI\", \"PyTorch\"]", material).is_empty());
+    }
+
+    #[test]
+    fn subjects_are_deduped_capped_and_only_strings_count() {
+        let material = "muse 是模型，dots 也是模型，都部署在 Kubernetes 上。";
+        // 大小写重复只留一个；非字符串元素直接跳过。
+        assert_eq!(
+            subjects("[\"muse\", \"Muse\", 7, {\"term\": \"dots\"}]", material),
+            vec!["muse"]
+        );
+        assert_eq!(
+            subjects("[\"muse\", \"dots\", \"Kubernetes\"]", material),
+            vec!["muse", "dots", "Kubernetes"]
+        );
+
+        let many = (1..=12)
+            .map(|index| format!("\"subject{index}\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        let material = (1..=12)
+            .map(|index| format!("subject{index}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(
+            subjects(&format!("[{many}]"), &material).len(),
+            VISUAL_ASSET_SEARCH_TERM_LIMIT
+        );
+    }
+
+    #[test]
+    fn unusable_replies_yield_no_subjects() {
+        for reply in ["", "没有需要检索的主体", "[\"unclosed", "{not: json}", "[]"] {
+            assert!(subjects(reply, "muse dots").is_empty(), "{reply}");
         }
-    }
-
-    #[test]
-    fn extracts_known_english_terms() {
-        let terms = extract("本方案使用 Docker、Kubernetes 和 OpenAI API 构建部署流程。");
-        assert!(terms.contains(&"Docker".to_string()), "{terms:?}");
-        assert!(terms.contains(&"Kubernetes".to_string()), "{terms:?}");
-    }
-
-    #[test]
-    fn extracts_chinese_object_terms() {
-        let material = "实验采用高分辨质谱仪对样品进行检测，随后使用离心机分离，\
-                        并通过六旋翼无人机完成野外采样。培养皿中的样品由机械臂转运。";
-        let terms = extract(material);
-        assert!(terms.iter().any(|t| t.contains("质谱仪")), "{terms:?}");
-        assert!(terms.contains(&"离心机".to_string()), "{terms:?}");
-        assert!(terms.iter().any(|t| t.contains("无人机")), "{terms:?}");
-        assert!(terms.contains(&"培养皿".to_string()), "{terms:?}");
-        assert!(terms.contains(&"机械臂".to_string()), "{terms:?}");
-    }
-
-    #[test]
-    fn chinese_nouns_keep_category_suffix() {
-        let terms = extract("现场部署了一套检测设备，配合 PyTorch框架 完成推理。");
-        assert!(terms.contains(&"检测设备".to_string()), "{terms:?}");
-        assert!(terms.contains(&"PyTorch".to_string()), "{terms:?}");
-        assert!(!terms.contains(&"PyTorch框架".to_string()), "{terms:?}");
-    }
-
-    #[test]
-    fn abstract_material_yields_nothing() {
-        let material = "针对带非光滑正则项的复合优化问题，提出一种自适应步长的近端梯度算法。\
-                        通过构造 Lyapunov 函数证明算法在弱凸假设下收敛到稳定点，并给出 O(1/k) 收敛速率。\
-                        进一步用 Jacobian 与 Hessian 分析步长参数对收敛常数的影响。";
-        assert!(extract(material).is_empty());
-    }
-
-    #[test]
-    fn query_splits_by_language() {
-        assert!(visual_asset_search_query("离心机", None, None).contains("实物外观"));
-        assert!(visual_asset_search_query("Docker", None, None).contains("official logo"));
     }
 
     #[test]
     fn context_text_pushes_real_depiction() {
-        let context = VisualAssetContext {
-            enabled: true,
-            degraded: false,
-            terms: vec!["离心机".to_string()],
-            items: vec![VisualAssetItem {
-                term: "离心机".to_string(),
-                brand: Some("离心机".to_string()),
-                category: Some("instrument".to_string()),
-                matched: Some("离心机".to_string()),
-                query: visual_asset_search_query("离心机", Some("离心机"), Some("instrument")),
-                results: vec![SearchResult {
-                    title: "离心机产品页".to_string(),
-                    url: "https://example.com".to_string(),
-                    snippet: "台式高速离心机".to_string(),
-                }],
-                error: None,
-                provider: "duckduckgo_html".to_string(),
+        let text = visual_asset_context_text(&context(
+            &["离心机"],
+            vec![SearchResult {
+                title: "离心机产品页".to_string(),
+                url: "https://example.com".to_string(),
+                snippet: "台式高速离心机".to_string(),
             }],
-            message: String::new(),
-        };
-        let text = visual_asset_context_text(&context);
-        assert!(text.contains("text-only evidence"));
-        assert!(text.contains("instead of text inside a box"));
-        assert!(text.contains("离心机产品页"));
-        assert!(text.contains(
-            "- Term: 离心机; brand: 离心机; category: instrument; matched in material: 离心机; query: "
         ));
+        assert!(text.contains("Original subject names are authoritative"));
+        assert!(text.contains("台式高速离心机"));
+        assert!(text.contains("https://example.com"));
+        assert!(text.contains("- Subject: 离心机"));
         assert!(!text.to_lowercase().contains("base64"));
     }
 
     #[test]
-    fn embedded_vocabulary_is_well_formed() {
-        let entries = &vocabulary().entries;
-        assert!(entries.len() >= 330, "{}", entries.len());
-        let mut seen: Vec<String> = Vec::new();
-        for entry in entries {
-            assert!(!entry.term.trim().is_empty());
+    fn no_subjects_means_visual_evidence_is_unavailable() {
+        let empty = VisualAssetContext {
+            enabled: true,
+            degraded: true,
+            terms: Vec::new(),
+            items: Vec::new(),
+            message: String::new(),
+        };
+        assert!(visual_asset_context_text(&empty).contains("visual evidence unavailable"));
+    }
+
+    #[test]
+    fn every_subject_keeps_descriptions_with_long_names_and_references() {
+        for long_names in [false, true] {
+            let terms: Vec<String> = (0..8)
+                .map(|index| {
+                    format!(
+                        "subject{index}{}",
+                        if long_names {
+                            "名".repeat(10000)
+                        } else {
+                            String::new()
+                        }
+                    )
+                })
+                .collect();
+            let mut context = VisualAssetContext {
+                enabled: true,
+                degraded: false,
+                terms: terms.clone(),
+                message: String::new(),
+                items: terms
+                    .iter()
+                    .enumerate()
+                    .map(|(index, term)| VisualAssetItem {
+                        term: term.clone(),
+                        provider: "grok_search".into(),
+                        results: (0..3)
+                            .map(|source| SearchResult {
+                                title: "Official source".into(),
+                                url: format!(
+                                    "https://example.test/{index}/{source}/{}",
+                                    "x".repeat(10000)
+                                ),
+                                snippet: format!(
+                                    "description-{index}-{source} silver arms {}",
+                                    "feature ".repeat(100)
+                                ),
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+            };
+            let text = visual_asset_context_text(&context);
             assert!(
-                !entry.brand.trim().is_empty(),
-                "{} has no brand",
-                entry.term
+                text.chars().count() <= VISUAL_CONTEXT_LIMIT,
+                "{}",
+                text.chars().count()
             );
-            assert!(
-                LOGO_CATEGORIES.contains(&entry.category.as_str())
-                    || OBJECT_CATEGORIES.contains(&entry.category.as_str()),
-                "{} has unknown category {:?}",
-                entry.term,
-                entry.category
-            );
-            for alias in std::iter::once(&entry.term).chain(entry.aliases.iter()) {
-                let key = alias.to_lowercase();
-                assert!(!seen.contains(&key), "duplicate vocabulary string: {alias}");
-                seen.push(key);
+            let full = visual_asset_log_text(&context);
+            for index in 0..8 {
+                assert!(text.contains(&format!("subject{index}")));
+                for source in 0..3 {
+                    assert!(text.contains(&format!("description-{index}-{source}")));
+                    assert!(text.contains(&format!("[{}.{}]", index + 1, source + 1)));
+                    assert!(full.contains(&context.items[index].results[source].url));
+                }
             }
+            context.items[7].results.clear();
+            assert!(visual_asset_context_text(&context).contains("Visual evidence unavailable"));
         }
     }
 
-    #[test]
-    fn boundary_matching_and_case_rules() {
-        assert!(found_terms("Pipeline").is_empty());
-        assert!(found_terms("Yield").is_empty());
-        assert!(found_terms("Co3O4").is_empty());
-        assert_eq!(found_terms("PyTorch框架"), vec!["PyTorch"]);
-        assert_eq!(found_terms("robot arm"), vec!["机械臂"]);
-        assert_eq!(found_terms("ARM Cortex"), vec!["ARM"]);
-        assert!(found_terms("ct scan").is_empty());
-        assert_eq!(found_terms("CT scan"), vec!["CT"]);
-        assert_eq!(found_terms("Hugging   Face"), vec!["Hugging Face"]);
+    #[tokio::test]
+    async fn search_request_failures_fail_the_job_instead_of_degrading() {
+        let subjects = vec!["Docker".to_string()];
+
+        // 每个协议一视同仁：路由、鉴权、限流、反爬页都必须让任务失败，
+        // 否则基础设施问题会被伪装成“这个主体查不到”。
+        for protocol in [GROK_SEARCH_PROTOCOL, "duckduckgo", "tavily", "openai_chat"] {
+            let profile = ModelProfile {
+                // 本地必然拒绝连接：测试不碰真网络，也不靠超时来失败。
+                base_url: "http://127.0.0.1:1".to_string(),
+                ..search_profile(protocol)
+            };
+            build_visual_asset_context(&subjects, &profile, None, &|_: DesignLog<'_>| {}, None)
+                .await
+                .expect_err("请求失败必须让任务失败，而不是降级成“没有来源”");
+        }
+
+        // 缺凭据同样是失败，不是降级。
+        let error = build_visual_asset_context(
+            &subjects,
+            &search_profile(GROK_SEARCH_PROTOCOL),
+            None,
+            &|_: DesignLog<'_>| {},
+            None,
+        )
+        .await
+        .expect_err("缺密钥必须让任务失败");
+        assert_eq!(error.code, "missing_api_key");
     }
 
-    #[test]
-    fn aliases_resolve_to_canonical_term_and_brand() {
-        let hits = vocabulary().find("Llama 3");
-        assert_eq!(hits.len(), 1, "{hits:?}");
-        assert_eq!(hits[0].term, "Llama");
-        assert_eq!(hits[0].brand.as_deref(), Some("Meta"));
-        assert_eq!(hits[0].matched.as_deref(), Some("Llama 3"));
-
-        let kimi = vocabulary().find("Kimi K2");
-        let moonshot = vocabulary().find("月之暗面");
-        assert_eq!(kimi.len(), 1, "{kimi:?}");
-        assert_eq!(moonshot.len(), 1, "{moonshot:?}");
-        assert_eq!(kimi[0].term, "月之暗面");
-        assert_eq!(kimi[0].term, moonshot[0].term);
-        assert_eq!(kimi[0].brand, moonshot[0].brand);
-    }
-
-    #[test]
-    fn longest_match_wins_across_entries() {
-        assert_eq!(found_terms("Unitree G1"), vec!["Unitree G1"]);
-        let xpeng = found_terms("Xpeng Iron");
-        assert!(xpeng.contains(&"Xpeng Iron".to_string()), "{xpeng:?}");
-        assert!(!xpeng.contains(&"Xpeng".to_string()), "{xpeng:?}");
-    }
-
-    #[test]
-    fn heuristic_candidates_covered_by_vocabulary_are_dropped() {
-        let terms = extract("智谱发布 GLM-4.5，性能领先。");
-        assert_terms(&terms, &["Zhipu"], &["GLM-4.5", "GLM"]);
-
-        // A longer heuristic phrase containing a hit as a whole word is redundant too,
-        // but an accidental substring outside word boundaries is not coverage.
-        let terms = extract("A CT image and a Spectrum Analyzer on the ARM Cortex-A78 board.");
-        assert_terms(
-            &terms,
-            &["CT", "ARM", "Spectrum Analyzer"],
-            &["ARM Cortex-A78"],
-        );
-    }
-
-    #[test]
-    fn query_uses_brand_and_category() {
-        let llama = visual_asset_search_query("Llama", Some("Meta"), Some("model"));
-        assert!(llama.contains("Meta"), "{llama}");
-        assert!(llama.contains("official logo"), "{llama}");
-
-        let g1 = visual_asset_search_query("Unitree G1", Some("Unitree"), Some("robot"));
-        assert!(g1.contains("product appearance"), "{g1}");
-        assert!(!g1.contains("official logo"), "{g1}");
-
-        let hailuo = visual_asset_search_query("海螺AI", Some("MiniMax"), Some("vendor"));
-        assert!(hailuo.contains("官方logo"), "{hailuo}");
-        assert!(hailuo.contains("MiniMax"), "{hailuo}");
-
-        // brand == term adds no duplicate prefix
-        assert!(
-            visual_asset_search_query("Docker", Some("Docker"), Some("infra"))
-                .starts_with("Docker official logo")
-        );
-    }
-
-    /// Same samples and expectations as the Python test suite (design.md §5).
-    #[test]
-    fn consistency_samples_match_reference() {
-        let samples: [(&str, &[&str], &[&str]); 9] = [
-            (
-                "本方案使用 Docker、Kubernetes 和 OpenAI API 构建部署流程。",
-                &["Docker", "Kubernetes", "OpenAI"],
-                &[],
-            ),
-            (
-                "我们在 Unitree G1 与宇树 Go2 上部署了基于 Qwen3 的 VLA 模型，并用 Isaac Sim 做仿真。",
-                &["Unitree G1", "Unitree Go2", "Qwen", "Isaac Sim"],
-                &["Unitree"],
-            ),
-            (
-                "The pipeline yields Co3O4 nanosheets; a robot arm transfers samples to the SEM.",
-                &["机械臂", "SEM"],
-                &["Inflection AI", "01.AI", "ARM", "OpenAI"],
-            ),
-            (
-                "月之暗面发布 Kimi K2，智谱发布 GLM-4.5，字节豆包持续迭代。",
-                &["月之暗面", "Zhipu", "字节跳动"],
-                &["GLM-4.5", "Kimi K2"],
-            ),
-            (
-                "现场部署了一套检测设备，配合 PyTorch框架 完成推理。",
-                &["PyTorch"],
-                &["PyTorch框架"],
-            ),
-            (
-                "We fit a GLM to the ROS data using a minimax estimator; the XAI module explains the step-3 flux. \
-                 Heat flux and momenta are plotted; the brain atlas was registered.",
-                &[],
-                &[],
-            ),
-            (
-                "Magnetic field of 1 Tesla; the Apollo mission; a Falcon 9 launch; whisper quietly; the mistral wind; \
-                 the cortex; a granite countertop; solar cells; palm oil; a snowflake dendrite.",
-                &[],
-                &[],
-            ),
-            (
-                "Tesla Optimus and Boston Dynamics Atlas walked; Figure 02 lifted boxes; Spot inspected the plant.",
-                &["Tesla Optimus", "Boston Dynamics Atlas", "Figure AI"],
-                &[],
-            ),
-            (
-                "The pipeline runs on ARM Cortex-A78; the robot arm and the arm of the chair; ct scan vs CT scan.",
-                &["ARM", "机械臂", "CT"],
-                &[],
-            ),
-        ];
-        for (material, expected, absent) in samples {
-            assert_eq!(
-                found_terms(material),
-                expected,
-                "vocabulary hits for {material}"
+    #[tokio::test]
+    async fn a_challenge_page_fails_the_job_with_its_reason() {
+        // DuckDuckGo 被拦住时返回 202 反爬页：不能安静地变成“没有来源”。
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut buffer = [0; 4096];
+            let _ = stream.read(&mut buffer).await.unwrap();
+            let body = "<div class=\"anomaly-modal\">Unfortunately, bots use DuckDuckGo too.</div>";
+            let response = format!(
+                "HTTP/1.1 202 Test\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
             );
-            let extracted = extract(material);
-            assert_terms(&extracted, expected, absent);
-            assert!(extracted.len() <= VISUAL_ASSET_SEARCH_TERM_LIMIT);
-        }
-        assert_terms(
-            &extract("现场部署了一套检测设备，配合 PyTorch框架 完成推理。"),
-            &["检测设备"],
-            &[],
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+        let profile = ModelProfile {
+            base_url: base,
+            ..search_profile("duckduckgo")
+        };
+
+        let error = build_visual_asset_context(
+            &["Docker".to_string()],
+            &profile,
+            None,
+            &|_: DesignLog<'_>| {},
+            None,
+        )
+        .await
+        .expect_err("反爬页必须让任务失败");
+        server.await.unwrap();
+        assert!(
+            error.message.contains("anti-bot challenge"),
+            "{}",
+            error.message
         );
+    }
+
+    #[tokio::test]
+    async fn grok_search_traces_the_request_of_a_failed_call() {
+        let logs = std::sync::Mutex::new(Vec::new());
+        let sink = |log: DesignLog<'_>| {
+            if let DesignLog::End { step, text, .. } = log {
+                logs.lock()
+                    .unwrap()
+                    .push((step.to_string(), text.to_string()));
+            }
+        };
+
+        let error = build_visual_asset_context(
+            &["Docker".to_string()],
+            &search_profile(GROK_SEARCH_PROTOCOL),
+            None,
+            &sink,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "missing_api_key");
+
+        // 每个词一次检索：发出去的请求体必须留下来，且两种搜索工具都已声明。
+        let logs = logs.lock().unwrap();
+        assert!(!logs.is_empty());
+        for (step, text) in logs.iter() {
+            assert!(step.starts_with("search_request_"), "{step}");
+            let payload: serde_json::Value = serde_json::from_str(text).expect("请求体是 JSON");
+            let kinds: Vec<&str> = payload["tools"]
+                .as_array()
+                .expect("tools")
+                .iter()
+                .filter_map(|tool| tool["type"].as_str())
+                .collect();
+            assert!(kinds.contains(&"x_search"), "{kinds:?}");
+            assert!(kinds.contains(&"web_search"), "{kinds:?}");
+            assert!(!text.contains("api_key"), "请求体里不该出现密钥");
+            // 检索阶段只用文本：母版截图绝不进入检索请求。
+            let lowered = text.to_lowercase();
+            for marker in ["image_url", "input_image", "base64", "data:image"] {
+                assert!(!lowered.contains(marker), "{marker} 不该出现在检索请求里");
+            }
+            let messages = payload["messages"].as_array().expect("messages");
+            assert!(
+                messages
+                    .iter()
+                    .all(|message| message["content"].is_string()),
+                "检索消息只能是文本"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn raw_subject_reaches_the_search_payload_unchanged() {
+        for raw in [
+            "grokbot",
+            "grok bot",
+            "gRoKbOt",
+            "gRoK   bot",
+            "myGrokbot_v2",
+            "cuda_model",
+            "sdxl-based",
+        ] {
+            let logs = std::sync::Mutex::new(Vec::new());
+            let sink = |log: DesignLog<'_>| {
+                if let DesignLog::End { text, ok, .. } = log {
+                    logs.lock().unwrap().push((text.to_string(), ok));
+                }
+            };
+            // 缺凭据就能走到真实请求构造：调用失败，但报文必须先留下。
+            let profile = ModelProfile {
+                base_url: "http://127.0.0.1:1".to_string(),
+                ..search_profile("openai_chat")
+            };
+            build_visual_asset_context(&[raw.to_string()], &profile, None, &sink, None)
+                .await
+                .expect_err("请求失败必须让任务失败");
+            let logs = logs.lock().unwrap();
+            assert_eq!(logs.len(), 1);
+            assert!(!logs[0].1, "failed calls must not be marked succeeded");
+            let payload: serde_json::Value = serde_json::from_str(&logs[0].0).unwrap();
+            assert_eq!(
+                payload["messages"][1]["content"],
+                format!("Search query: {raw}")
+            );
+        }
     }
 }

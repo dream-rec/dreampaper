@@ -138,9 +138,9 @@ def build_timeout(timeout_seconds: int | float | None, *, minimum: int | None = 
 
 
 def create_async_client(timeout: httpx.Timeout, proxy_url: str | None = None) -> httpx.AsyncClient:
-    if proxy_url:
-        return httpx.AsyncClient(timeout=timeout, proxy=proxy_url)
-    return httpx.AsyncClient(timeout=timeout)
+    # 代理只认设置里填的值：trust_env=False 让 shell 里的 HTTP_PROXY / HTTPS_PROXY /
+    # ALL_PROXY 不再被自动采用（残留代理会让请求瞬间连到不存在的本地端口）。
+    return httpx.AsyncClient(timeout=timeout, proxy=proxy_url or None, trust_env=False)
 
 
 def format_transport_error(error: httpx.TransportError, proxy_url: str | None = None) -> str:

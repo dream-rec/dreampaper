@@ -27,6 +27,7 @@
   --accent-deep: #9d3fe0;
   --panel-bg: rgba(255, 248, 252, 0.82);
   --soft-bg: rgba(247, 240, 247, 0.88);
+  --inset: rgba(244, 240, 250, 0.96);
   --text-muted: #68707a;
   --shadow-panel:
     0 18px 38px rgba(129, 112, 134, 0.14),
@@ -181,6 +182,73 @@ button {
   flex-wrap: wrap;
   align-items: center;
   gap: var(--space-2);
+}
+
+/* —— Global Simple Mode switch —— */
+/* Shared by the web top bar and the desktop head. The native checkbox stays in
+   the DOM — hidden but 1px, not display:none — so Tab reaches it and the label
+   still toggles it; the visible pill is drawn around it. */
+.simple-switch {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 34px;
+  padding: 0 13px 0 11px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.66);
+  box-shadow: var(--shadow-control);
+  color: #4b5560;
+  font-size: 0.8rem;
+  font-weight: 700;
+  cursor: pointer;
+  user-select: none;
+}
+
+.simple-switch input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+.simple-switch:focus-within {
+  outline: 2px solid var(--accent-deep);
+  outline-offset: 2px;
+}
+
+.simple-switch-track {
+  position: relative;
+  flex: none;
+  width: 34px;
+  height: 19px;
+  border-radius: 999px;
+  background: #dcd5e0;
+  transition: background 160ms ease;
+}
+
+.simple-switch-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 15px;
+  height: 15px;
+  border-radius: 999px;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(90, 78, 96, 0.32);
+  transition: transform 160ms ease;
+}
+
+.simple-switch input:checked + .simple-switch-track {
+  background: var(--accent);
+}
+
+.simple-switch input:checked + .simple-switch-track .simple-switch-thumb {
+  transform: translateX(15px);
+}
+
+.simple-switch-label {
+  white-space: nowrap;
 }
 
 .nav button,
@@ -1177,6 +1245,35 @@ textarea:focus {
   cursor: default;
 }
 
+/* 继续/重试：任务已经停下，这是面板上唯一能往前走的一步，所以用强调色。 */
+.resume-job-button {
+  min-height: 28px;
+  padding: 0 14px;
+  border: none;
+  border-radius: 999px;
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: #ffffff;
+  background: var(--accent);
+  box-shadow: var(--shadow-control);
+  cursor: pointer;
+  transition: background 0.18s ease, transform 0.18s ease;
+}
+
+.resume-job-button:hover:not(:disabled) {
+  background: var(--accent-deep);
+}
+
+.resume-job-button:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.resume-job-button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
 .progress-step-count {
   margin-left: auto;
   color: var(--text-muted);
@@ -1367,139 +1464,217 @@ textarea:focus {
   font-size: 0.76rem;
 }
 
-.design-log {
+/* Process and final output are siblings of progress, never its children. */
+.flow-log {
   display: grid;
+  gap: 12px;
+  min-width: 0;
+  margin: 0 0 18px;
+  padding: 0;
+}
+
+/* Search / Design / Implement 是同一层级的容器：同底色、同描边，层级只由内部卡片拉开。 */
+.flow-stage {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid rgba(169, 161, 181, 0.2);
+  border-radius: 16px;
+  background: var(--soft-bg);
+}
+
+.flow-empty {
+  min-height: 40px;
+  margin: 0;
+  padding: 8px 0;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+.flow-log-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.flow-log-head h3 {
+  margin: 0;
+  color: #4a3a56;
+  font-size: 0.86rem;
+  font-weight: 780;
+}
+
+.flow-log-count {
+  min-width: 20px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: rgba(229, 209, 250, 0.9);
+  color: #5c3b78;
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.flow-log-hint {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.76rem;
+  line-height: 1.45;
+}
+
+.flow-list {
+  display: grid;
+  min-height: 40px;
   gap: 10px;
+  /* 标题与说明自成一块，列表另起一段。 */
+  margin: 6px 0 0;
+  padding: 0;
+  min-width: 0;
+  list-style: none;
+}
+
+/* 阶段卡片与折叠行共用同一套 0fr → 1fr 生长动画：插入时把下面的内容整体顶开。 */
+.flow-entry,
+.flow-stage-entry {
+  display: grid;
+  grid-template-rows: 1fr;
+  min-width: 0;
+  animation: flow-insert 380ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.flow-entry-inner,
+.flow-stage-entry-inner {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.flow-item {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid rgba(169, 161, 181, 0.16);
+  border-radius: 14px;
+  border-left: 3px solid rgba(169, 221, 199, 0.5);
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: var(--shadow-control);
+  transition: border-color 200ms ease, background 200ms ease;
+}
+.flow-item.active {
+  border-left-color: #5fba96;
+  background: rgba(240, 250, 245, 0.94);
+}
+
+.flow-item.failed {
+  border-left-color: #e98298;
+  background: rgba(255, 244, 246, 0.92);
+}
+
+.flow-item.prompt {
+  border-left-color: var(--accent);
+  background: rgba(252, 246, 255, 0.92);
+}
+
+/* 卡片自己被状态色染色时，内容块改用卡片底色，否则两者会糊在一起。 */
+.flow-item.active .flow-text,
+.flow-item.failed .flow-text,
+.flow-item.prompt .flow-text {
+  background: rgba(255, 255, 255, 0.92);
+}
+
+@keyframes flow-insert {
+  from {
+    grid-template-rows: 0fr;
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    grid-template-rows: 1fr;
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.flow-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-right: 13px;
   min-width: 0;
 }
 
-.design-log-toggle {
+/* 标题栏不做悬停/选中强调色：卡片自己的底色已经够表达层级，叠一层只会跟内容块抢眼。 */
+.flow-toggle {
   display: flex;
   align-items: center;
   gap: 10px;
-  width: 100%;
-  padding: 9px 12px;
+  flex: 1;
+  min-width: 0;
+  padding: 11px 4px 11px 13px;
   border: none;
   border-radius: 14px;
-  background: rgba(255, 255, 255, 0.66);
-  box-shadow: var(--shadow-control);
-  color: #4b5560;
-  font-family: inherit;
-  font-size: 0.82rem;
+  background: transparent;
+  color: #3b4650;
+  font: inherit;
+  font-size: 0.84rem;
   font-weight: 720;
   text-align: left;
   cursor: pointer;
 }
 
-.design-log-toggle:hover {
-  background: rgba(255, 255, 255, 0.88);
+.flow-toggle:hover {
+  background: transparent;
+}
+
+.flow-toggle:focus-visible,
+.flow-copy:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -3px;
 }
 
 /* A triangle rather than a glyph: the caret has to rotate, and a rotated text
    character shifts its own baseline as it turns. */
-.design-log-caret {
+.flow-caret {
   width: 0;
   height: 0;
+  flex: none;
   border-top: 4.5px solid transparent;
   border-bottom: 4.5px solid transparent;
   border-left: 6px solid #8b949c;
-  transition: transform 180ms ease;
+  transition: transform 200ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
-.design-log.is-open .design-log-caret {
+.flow-item.is-open .flow-caret {
   transform: rotate(90deg);
 }
 
-.design-log-title {
-  flex: 1;
-  min-width: 0;
-}
-
-.design-log-count {
-  min-width: 20px;
-  padding: 1px 7px;
-  border-radius: 999px;
-  background: rgba(214, 240, 229, 0.8);
-  color: #2f5a48;
-  font-size: 0.74rem;
-  font-variant-numeric: tabular-nums;
-  text-align: center;
-}
-
-.design-log-list {
-  display: grid;
-  gap: 10px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  min-width: 0;
-  /* The cards slide in from the right; without this the transform paints over
-     the panel edge for the length of the animation. */
-  overflow: hidden;
-}
-
-.design-log-item {
-  display: grid;
-  gap: 8px;
-  min-width: 0;
-  padding: 11px 13px;
-  border-radius: 14px;
-  border-left: 3px solid rgba(169, 221, 199, 0.5);
-  background: rgba(255, 255, 255, 0.72);
-  box-shadow: var(--shadow-control);
-  animation: design-log-in 340ms cubic-bezier(0.22, 1, 0.36, 1);
-}
-
-.design-log-item.active {
-  border-left-color: #5fba96;
-  background: rgba(240, 250, 245, 0.94);
-}
-
-.design-log-item.failed {
-  border-left-color: #e98298;
-  background: rgba(255, 244, 246, 0.92);
-}
-
-.design-log-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-
-.design-log-dot {
+.flow-dot {
   width: 8px;
   height: 8px;
+  flex: none;
   border-radius: 999px;
   background: #a9ddc7;
-  flex: none;
 }
 
-.design-log-item.active .design-log-dot {
+.flow-item.active .flow-dot {
   background: #5fba96;
   animation: step-pulse 1.2s ease-in-out infinite;
 }
 
-.design-log-item.failed .design-log-dot {
+.flow-item.failed .flow-dot {
   background: #e98298;
   animation: none;
 }
 
-.design-log-label {
-  color: #3b4650;
-  font-size: 0.86rem;
-  font-weight: 720;
+.flow-title {
+  flex: 1;
+  min-width: 0;
   overflow-wrap: anywhere;
 }
 
-.design-log-step {
-  color: var(--text-muted);
-  font-size: 0.72rem;
-  font-variant-numeric: tabular-nums;
-}
-
-.design-log-badge {
+.flow-badge {
   margin-left: auto;
   padding: 1px 8px;
   border-radius: 999px;
@@ -1509,35 +1684,68 @@ textarea:focus {
   font-weight: 700;
 }
 
-.design-log-body {
+.flow-copy {
+  flex: none;
+  padding: 4px 11px;
+  border: none;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.9);
+  box-shadow: var(--shadow-control);
+  color: #5c3b78;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.flow-copy:hover {
+  filter: brightness(0.96);
+}
+
+/* 0fr → 1fr animates to the row's own height, and the growth pushes the rows
+   below it down: the insert-and-push feel, without measuring anything. */
+.flow-body {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 260ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+.flow-item.is-open .flow-body {
+  grid-template-rows: 1fr;
+}
+
+.flow-body-inner {
+  overflow: hidden;
+  min-height: 0;
+}
+
+.flow-block {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 4px 13px 12px;
+}
+
+.flow-block-label {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.flow-text {
   margin: 0;
   max-height: 240px;
   overflow: auto;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--inset);
   color: #4d5761;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.76rem;
   line-height: 1.5;
-  /* Model output is long single lines of JSON; wrapping keeps the card from
+  /* Model output is long single lines of JSON; wrapping keeps the row from
      growing a horizontal scrollbar wider than the panel. */
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-}
-
-.design-log-body:empty::after {
-  content: '';
-  display: block;
-  min-height: 1.2em;
-}
-
-@keyframes design-log-in {
-  from {
-    opacity: 0;
-    transform: translateX(26px);
-  }
-  to {
-    opacity: 1;
-    transform: translateX(0);
-  }
+  user-select: text;
 }
 
 .error-diagnostic {
@@ -1755,13 +1963,16 @@ textarea:focus {
   }
 
   .step-log-panel,
-  .design-log-item,
+  .flow-entry,
+  .flow-item,
   .progress-track.running span,
   .toast {
     animation: none;
   }
 
-  .design-log-caret {
+  .flow-head,
+  .flow-caret,
+  .flow-body {
     transition-duration: 1ms;
   }
 }
