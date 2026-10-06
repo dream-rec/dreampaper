@@ -36,6 +36,7 @@ Linux Debian 发布、全局简单模式，以及适配 grok2api v3 的 Grok 搜
 - **最终提示词改为必须落盘**。简单模式的产物只有提示词，写入失败时任务判定为失败，不再沿用过程日志忽略写入错误的做法；实时事件只在写入成功之后发出，避免前端显示并未保存的内容。
 - **版本同步补齐锁文件**。`.github/scripts/set-version.mjs` 同时更新主应用 `Cargo.lock` 的版本条目，打标签时不会因版本改动让 `cargo test --locked` 失败。
 - **发布验收扩展到五类**。归集与草稿从四类产物改为五类，Linux 缺失时同样阻止生成草稿。
+- **Linux ORT 允许 `$ORIGIN`**。1.29 的动态库带相对 `RUNPATH`（`$ORIGIN`，表示库自己所在目录）。验收仍拒绝绝对路径和指向暂存目录之外的 `$ORIGIN`，不再把相对标记误判成构建机路径。
 - **Linux 桌面端切换页面闪退与卡顿**。WebKitGTK 2.50 的 View Transition 实现在 Linux 上会让进程 SIGSEGV（[tauri-apps/tauri#14721](https://github.com/tauri-apps/tauri/issues/14721)）；桌面端不再调用该 API，也不再对整页做透明度过渡、不再用 `grid-template-rows` 动画展开设置项。这两种动画都会让 WebKit 在主线程上逐帧重排，切页和折叠设置都会顿一下。
 - **DuckDuckGo 单独配置代理**。Search 里选 `duckduckgo` 时多一个代理栏，只给这一协议用，优先于「代理与并发」里的总代理；两者都空则直连。不读取 shell 的 `HTTPS_PROXY` / `HTTP_PROXY`。直连超时的错误会带上原因，而不只是「发送失败」。
 - **简单模式首次说明**。第一次处于开启状态时弹出说明：结果是制图提示词而不是图片，绕过 Implement model，适合没有制图 API 的用户把提示词拿到网页端生图。必须点「我已知晓」才会关掉，之后不再出现。

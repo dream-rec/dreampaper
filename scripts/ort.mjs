@@ -2,7 +2,7 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpat
 import { join, resolve } from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { availableParallelism } from 'node:os';
-import { digest, filesIn, locked, root, targetInfo, targets, verifyRuntime } from './runtime.mjs';
+import { digest, filesIn, linuxBinaryProblems, locked, root, targetInfo, targets, verifyRuntime } from './runtime.mjs';
 
 const PATCHES = [
   {
@@ -100,7 +100,7 @@ if (windows) {
   }
   inspection += buildVersion;
 } else {
-  inspection = inspectElf(join(destination, info.library), arch);
+  inspection = inspectElf(join(destination, info.library), arch, destination);
 }
 writeFileSync(join(destination, 'manifest.json'), JSON.stringify({
   version: locked.version, commit: locked.commit, triple,
@@ -116,17 +116,17 @@ console.log(`ORT_BUILD_OK ${destination}`);
  * Linux 产物必须真的是目标架构的 ELF、不带构建机路径，而且依赖在当前镜像里可解析。
  * Tauri 的 deb 打包不会自动推导依赖，所以这里先把“能不能加载”拦在前面。
  */
-function inspectElf(path, expectedArch) {
+function inspectElf(path, expectedArch, stageRoot) {
   const header = capture('readelf', ['-h', path]);
   const machine = expectedArch === 'x86_64' ? 'Advanced Micro Devices X86-64' : 'AArch64';
   if (!/Class:\s+ELF64/.test(header)) throw new Error(`ORT 不是 64 位 ELF：${path}`);
   if (!header.includes(machine)) throw new Error(`ORT 架构不符（期望 ${machine}）：\n${header}`);
   const dynamic = capture('readelf', ['-d', path]);
-  for (const match of dynamic.matchAll(/\((?:RPATH|RUNPATH)\)[^\n]*\[([^\]]+)\]/g)) {
-    throw new Error(`ORT 不得携带 RPATH/RUNPATH（会把构建机路径带进产物）：${match[1]}`);
-  }
   const linked = capture('ldd', [path]);
-  if (/not found/i.test(linked)) throw new Error(`ORT 动态依赖不可解析：\n${linked}`);
+  // ONNX Runtime 1.29 在 Linux 上会写入 `$ORIGIN`。这是相对库自身目录的标记，
+  // 不会把 /home/runner 这类构建机路径带进产物；绝对路径和越出暂存目录的 $ORIGIN 仍拒绝。
+  const problems = linuxBinaryProblems({ file: path, dynamic, linked, root: stageRoot });
+  if (problems.length) throw new Error(`ORT 动态依赖不合格：\n${problems.join('\n')}`);
   return `${header}\n${dynamic}\n${linked}`;
 }
 
