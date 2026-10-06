@@ -19,6 +19,8 @@ export interface ModelProfile {
   output_defaults: Record<string, JsonValue>;
   has_api_key?: boolean;
   api_key_hint?: string | null;
+  /** DuckDuckGo 专用。有值时优先于 AppConfig.proxy_url。 */
+  proxy_url?: string | null;
 }
 
 export interface AppConfig {

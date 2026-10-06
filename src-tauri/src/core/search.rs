@@ -4,7 +4,8 @@ use serde_json::{json, Value};
 
 use crate::core::config::ModelProfile;
 use crate::core::net::{
-    build_model_client, model_error, normalize_base_url, post_json_with_retries, require_api_key,
+    build_model_client, describe_transport_error, duckduckgo_proxy, model_error, normalize_base_url,
+    post_json_with_retries, require_api_key,
 };
 use crate::error::AppResult;
 
@@ -113,7 +114,8 @@ impl SearchClient {
     ) -> AppResult<Vec<SearchResult>> {
         let url = duckduckgo_url(&profile.base_url, query);
         let timeout = profile.request_timeout();
-        let client = build_model_client(timeout, proxy_url)?;
+        let proxy = duckduckgo_proxy(profile.proxy_url.as_deref(), proxy_url);
+        let client = build_model_client(timeout, proxy.as_deref())?;
         let mut request = client.get(&url);
         for (key, value) in DUCKDUCKGO_HEADERS {
             request = request.header(key, value);
@@ -123,10 +125,15 @@ impl SearchClient {
                 request = request.header(key.as_str(), text);
             }
         }
-        let response = request
-            .send()
-            .await
-            .map_err(|error| model_error(format!("DuckDuckGo search failed: {error}")))?;
+        let response = request.send().await.map_err(|error| {
+            let detail = describe_transport_error(&error);
+            let hint = if proxy.is_none() {
+                " 直连 html.duckduckgo.com 失败。请在 DuckDuckGo 的代理栏填写地址，或填写设置里的总代理。"
+            } else {
+                ""
+            };
+            model_error(format!("DuckDuckGo search failed: {detail}{hint}"))
+        })?;
         let status = response.status().as_u16();
         if status >= 400 {
             return Err(model_error(format!(

@@ -3,6 +3,7 @@ export type Theme = 'light' | 'dark';
 const THEME_KEY = 'dreampaper.theme';
 const AUTO_UPDATE_KEY = 'dreampaper.autoUpdate';
 const SIMPLE_MODE_KEY = 'dreampaper.simpleMode';
+const SIMPLE_MODE_ACK_KEY = 'dreampaper.simpleModeAck';
 
 function read(key: string): string | null {
   try {
@@ -57,4 +58,13 @@ export function simpleModePreference(): boolean {
 
 export function saveSimpleMode(enabled: boolean): void {
   write(SIMPLE_MODE_KEY, String(enabled));
+}
+
+/** First time Simple Mode is turned on, the notice stays until this is set. */
+export function simpleModeAcknowledged(): boolean {
+  return read(SIMPLE_MODE_ACK_KEY) === 'true';
+}
+
+export function acknowledgeSimpleMode(): void {
+  write(SIMPLE_MODE_ACK_KEY, 'true');
 }

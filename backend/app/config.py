@@ -112,7 +112,7 @@ class ConfigStore:
             return default_config()
         data = json.loads(self.path.read_text(encoding="utf-8"))
         config = AppConfig.model_validate(data)
-        return self._ensure_search_profile(config)
+        return self._normalize_duckduckgo_proxy(self._ensure_search_profile(config))
 
     def save(self, incoming: AppConfig) -> AppConfig:
         existing = self.load()
@@ -131,7 +131,7 @@ class ConfigStore:
                 "active_search_profile": incoming.active_search_profile or "search-default",
             }
         )
-        saved = self._ensure_search_profile(saved)
+        saved = self._normalize_duckduckgo_proxy(self._ensure_search_profile(saved))
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(saved.model_dump_json(indent=2), encoding="utf-8")
         try:
@@ -262,6 +262,24 @@ class ConfigStore:
         return config.model_copy(update={"model_profiles": profiles})
 
     @staticmethod
+    def _normalize_duckduckgo_proxy(config: AppConfig) -> AppConfig:
+        profiles: list[ModelProfile] = []
+        changed = False
+        for profile in config.model_profiles:
+            proxy = (
+                normalize_proxy_url(profile.proxy_url)
+                if profile.role == "search" and profile.protocol == DUCKDUCKGO_PROTOCOL
+                else None
+            )
+            if proxy != profile.proxy_url:
+                changed = True
+                profile = profile.model_copy(update={"proxy_url": proxy})
+            profiles.append(profile)
+        if not changed:
+            return config
+        return config.model_copy(update={"model_profiles": profiles})
+
+    @staticmethod
     def _public_profile(profile: ModelProfile) -> PublicModelProfile:
         hint = None
         if profile.api_key:
@@ -280,5 +298,6 @@ class ConfigStore:
             output_defaults=profile.output_defaults,
             has_api_key=bool(profile.api_key),
             api_key_hint=hint,
+            proxy_url=profile.proxy_url,
         )
 

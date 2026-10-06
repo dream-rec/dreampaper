@@ -31,6 +31,14 @@ DUCKDUCKGO_HEADERS = {
 }
 
 
+def duckduckgo_proxy(profile_proxy: str | None, settings_proxy: str | None) -> str | None:
+    """DuckDuckGo 自己的代理优先于应用级代理。两者都空则直连，不读环境变量。"""
+    for candidate in (profile_proxy, settings_proxy):
+        if candidate and candidate.strip():
+            return candidate.strip()
+    return None
+
+
 def duckduckgo_challenge(body: str) -> bool:
     """DuckDuckGo 的反爬页：HTTP 202，正文里带 anomaly-modal。
 
@@ -116,8 +124,17 @@ class SearchClient:
             url = f"{base}/html/?q={quote_plus(query)}"
         timeout = httpx.Timeout(float(profile.timeout_seconds or 15))
         headers = {**DUCKDUCKGO_HEADERS, **(profile.headers or {})}
-        async with create_async_client(timeout, proxy_url) as client:
-            response = await client.get(url, headers=headers)
+        proxy = duckduckgo_proxy(profile.proxy_url, proxy_url)
+        try:
+            async with create_async_client(timeout, proxy) as client:
+                response = await client.get(url, headers=headers)
+        except httpx.TransportError as exc:
+            hint = (
+                ""
+                if proxy
+                else " 直连 html.duckduckgo.com 失败。请在 DuckDuckGo 的代理栏填写地址，或填写设置里的总代理。"
+            )
+            raise SearchClientError(f"DuckDuckGo search failed: {exc}{hint}") from exc
         if response.status_code >= 400:
             raise SearchClientError(f"DuckDuckGo search failed: HTTP {response.status_code}")
         if duckduckgo_challenge(response.text):

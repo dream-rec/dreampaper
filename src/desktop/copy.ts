@@ -3,7 +3,12 @@ import type { Lang } from '../app';
 export const desktopCopy = {
   zh: {
     nav: { paper: '科研图', ppt: '幻灯片', templates: '模板库', history: '历史', workbench: '工作台', settings: '设置', about: '项目介绍' },
-    simple: { label: '简单模式', hint: '不调用制图模型，只输出最终制图提示词；对之后提交的任务生效' },
+    simple: {
+      label: '简单模式',
+      hint: '不调用制图模型，只输出最终制图提示词；对之后提交的任务生效',
+      notice: '最终结果是制图提示词，不是图片。本模式绕过 Implement model，适合没有制图 API 的用户，把提示词拿到网页端完成生图。',
+      ack: '我已知晓'
+    },
     workbenchIntro: '框选修补错字、恢复可编辑文本、按原图像素裁剪，并以无损 PNG 导出。',
     settingsIntro: '配置 Design / Implement / Search 模型，以及代理与并发。',
     theme: { light: '切换到浅色模式', dark: '切换到深色模式' },
@@ -137,7 +142,12 @@ export const desktopCopy = {
   },
   en: {
     nav: { paper: 'Figure', ppt: 'Slide', templates: 'Templates', history: 'History', workbench: 'Workbench', settings: 'Settings', about: 'About' },
-    simple: { label: 'Simple mode', hint: 'Skip the drawing model and output the final drawing prompt only; applies to jobs submitted from now on' },
+    simple: {
+      label: 'Simple mode',
+      hint: 'Skip the drawing model and output the final drawing prompt only; applies to jobs submitted from now on',
+      notice: 'The result is a drawing prompt, not an image. This mode skips the Implement model. It is for people without an image API: take the prompt to the web and finish the picture there.',
+      ack: 'I understand'
+    },
     workbenchIntro: 'Repair text, crop at source pixels, and export a lossless PNG.',
     settingsIntro: 'Configure Design / Implement / Search models, proxy and concurrency.',
     theme: { light: 'Switch to light mode', dark: 'Switch to dark mode' },

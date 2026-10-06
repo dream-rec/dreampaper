@@ -48,6 +48,10 @@
   color: var(--text-1);
   font-size: 13px;
   background: var(--canvas);
+  /* :root sets optimizeLegibility. WebKit then uses the slow text path for
+     every caret move, so clicking between fields or pressing Tab waits on
+     kerning instead of showing the cursor. */
+  text-rendering: auto;
 }
 
 :root[data-theme='dark'] .desktop-shell {
@@ -419,23 +423,29 @@
   overflow: hidden;
 }
 
-/* Inactive pages stay in the tree (see `visited`) but must not paint or take
-   hits. The active pane is the definite grid track workbench and the task
-   pages fill. */
+/* Inactive pages stay mounted but are not painted. An opacity crossfade kept
+   every visited page on the compositor and WebKit redrew them on the main
+   thread for the whole 180ms, which is the hitch when changing pages. */
 .desktop-pane {
-  display: none;
+  display: grid;
+  position: relative;
+  z-index: 0;
   grid-area: 1 / 1;
+  grid-template-rows: minmax(0, 1fr);
   min-width: 0;
   min-height: 0;
+  overflow-y: auto;
+  content-visibility: hidden;
+  pointer-events: none;
 }
 
 .desktop-pane.is-active {
-  display: grid;
-  grid-template-rows: minmax(0, 1fr);
-  overflow-y: auto;
+  content-visibility: visible;
+  pointer-events: auto;
+  z-index: 1;
 }
 
-.desktop-pane.clips.is-active {
+.desktop-pane.clips {
   overflow: hidden;
 }
 
@@ -515,6 +525,8 @@
   min-height: 0;
   flex-direction: column;
   overflow: hidden;
+  /* Focusing a field in the form must not relayout the template grid beside it. */
+  contain: layout;
   border-radius: var(--r-card);
   background: var(--card);
   box-shadow: var(--shadow-card);
@@ -707,7 +719,6 @@
   font-size: 12.5px;
   appearance: none;
   -webkit-appearance: none;
-  transition: background-color 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
 }
 
 .desktop-shell select {
@@ -782,8 +793,12 @@
 .desktop-shell textarea:focus {
   border-color: var(--accent);
   background-color: var(--card);
-  box-shadow: 0 0 0 3px var(--accent-soft);
-  outline: none;
+  /* The shared stylesheet paints a four-layer inset shadow on every focused
+     field. On the method textarea that blur is a large main-thread paint, so
+     the caret arrives late. Keep the ring as an outline and cancel that shadow. */
+  box-shadow: none;
+  outline: 3px solid var(--accent-soft);
+  outline-offset: 1px;
 }
 
 .desktop-shell input[readonly] {

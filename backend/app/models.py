@@ -27,6 +27,8 @@ class ModelProfile(BaseModel):
     timeout_seconds: int = 120
     max_retries: int = 2
     output_defaults: dict[str, Any] = Field(default_factory=dict)
+    # 只对 duckduckgo 有意义：有值时优先于 AppConfig.proxy_url。
+    proxy_url: str | None = None
 
 
 class PublicModelProfile(BaseModel):
@@ -43,6 +45,7 @@ class PublicModelProfile(BaseModel):
     output_defaults: dict[str, Any] = Field(default_factory=dict)
     has_api_key: bool = False
     api_key_hint: str | None = None
+    proxy_url: str | None = None
 
 
 class AppConfig(BaseModel):

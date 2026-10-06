@@ -15,7 +15,7 @@ import {
   uploadAsset
 } from './api';
 import type { AppConfig, AssetUpload, JobDesignLog, JobRating, JobRecord, ModelProfile, TemplateSummary } from './types';
-import { saveSimpleMode, simpleModePreference } from './desktop/prefs';
+import { acknowledgeSimpleMode, saveSimpleMode, simpleModeAcknowledged, simpleModePreference } from './desktop/prefs';
 
 export type Lang = 'zh' | 'en';
 type UiMode = 'paper' | 'ppt' | 'settings';
@@ -73,7 +73,12 @@ export const emptyConfig: AppConfig = {
 export const copy = {
   zh: {
     nav: { paper: '科研图', ppt: '幻灯片', settings: '设置' },
-    simple: { label: '简单模式', hint: '不调用制图模型，只输出最终制图提示词' },
+    simple: {
+      label: '简单模式',
+      hint: '不调用制图模型，只输出最终制图提示词',
+      notice: '最终结果是制图提示词，不是图片。本模式绕过 Implement model，适合没有制图 API 的用户，把提示词拿到网页端完成生图。',
+      ack: '我已知晓'
+    },
     brandSub: 'figure / slide',
     common: {
       protocol: '协议',
@@ -90,7 +95,7 @@ export const copy = {
       noFile: '未选择',
       uploadedFiles: '已上传'
     },
-    settings: { design: 'Design', implement: 'Implement', search: 'Search', searchHint: '幻灯片视觉素材检索。duckduckgo 免密钥，端点写死、不用填 URL；tavily 填 API key；grok_search 就是 OpenAI 兼容的 chat completions（grok2api 即此协议），模型填部署里自带 x_search / web_search 联网能力的模型 ID（例如 grok-build-0.1）。三种协议各自保存自己的配置，切换协议不会互相覆盖，也不会带上上一个协议的值。duckduckgo 走的是它的无 JS 页面，被人机验证拦住时会直接报错，长期用建议换 tavily 或 grok_search。', proxyAndConcurrency: '代理与并发', proxy: '代理', proxyHint: '本地代理地址，例如 http://127.0.0.1:7890；留空表示不指定代理。', concurrency: '幻灯片并发', concurrencyHint: '留空表示跟随本次输入的幻灯片页数；实际并发不会超过页数。制图建议先设为 1，降低网关 502。', pagePlanConcurrency: '规划并发', imageConcurrency: '制图并发', defaultByPages: '默认=页数', size: '尺寸', quality: '质量', format: '格式', ratio: '比例', clarity: '清晰度', tendency: '倾向', version: '版本', timeout: '超时(秒)', timeoutHint: '同步出图可能较久，implement 建议 600–900；grok_search 要让上游模型自己联网检索，建议 ≥120 秒。', retries: '重试次数', maxResults: '结果数', stream: '流式', streamOn: '开启', keySet: '密钥已配置', keyNone: '未配置密钥', proxySet: '代理已配置', proxyNone: '未设置代理', notSet: '未设置' },
+    settings: { design: 'Design', implement: 'Implement', search: 'Search', proxyAndConcurrency: '代理与并发', proxy: '代理', concurrency: '幻灯片并发', pagePlanConcurrency: '规划并发', imageConcurrency: '制图并发', defaultByPages: '默认=页数', size: '尺寸', quality: '质量', format: '格式', ratio: '比例', clarity: '清晰度', tendency: '倾向', version: '版本', timeout: '超时(秒)', retries: '重试次数', maxResults: '结果数', stream: '流式', streamOn: '开启', keySet: '密钥已配置', keyNone: '未配置密钥', proxySet: '代理已配置', proxyNone: '未设置代理', notSet: '未设置' },
     paper: { title: '科研图', intro: '选择 template 作为 few-shot 风格参考。', figureTitle: '标题', description: '方法', ratio: '比例', fidelity: '布局', strength: '风格', custom: '约束', customHint: '可选，用于补充禁用元素、强调风格、文字限制或审稿要求。', generate: '生成', generating: '生成中…', search: '搜索', kind: '类型', inherited: '继承', submitted: '科研图任务已提交' },
     ppt: { title: '幻灯片', intro: '上传 template，分析母版，再批量生成页面。', template: '母版', pages: '页数', material: '资料', materialFile: '附件', materialHint: '可输入文字，也可上传 pdf、docx、txt、md、csv 等资料。', custom: '约束', customHint: '可选，用于补充页数结构、禁用元素、术语、颜色或展示重点。', generate: '生成', generating: '生成中…', submitted: '幻灯片任务已提交', uploading: '上传中...', uploaded: '已上传' },
     result: { title: 'Result', waiting: '等待中', progress: '进度', current: '当前', step: '当前步骤', failed: '失败', completed: '完成', queued: '排队中', running: '运行中', cancelled: '已停止', preview: '预览', download: '下载', of: '/', elapsed: '已用时', stop: '停止任务', stopping: '停止中…', retry: '重试', resume: '继续任务', resuming: '正在继续…', resumeFailed: '继续失败', stopped: '任务已停止', stopFailed: '停止失败', saveFailed: '保存失败', previewFailed: '预览失败', editWorkbench: '在工作台编辑', errorTitle: '故障诊断', errorRole: '相关配置', errorProfile: '配置名称', errorModel: '模型', errorEndpoint: '请求地址', errorStatus: 'HTTP 状态', errorStage: '失败阶段', errorSuggestion: '处理建议', flowLog: '生成过程', searchStage: 'Search', designStage: 'Design', implementStage: 'Implement', searchHint: '检索原始元素，查看描述与参考来源。', designHint: '母版分析、大纲与内容规划。', implementEmpty: '暂无最终产物。', flowQuery: (n: number) => `查询 ${n}`, queryContent: '查询内容', queryResult: '查询结果', stepEmpty: '这一步没有返回内容', stepStreaming: '接收中…', pagePrep: (n: number) => `准备第 ${n} 页规划`, pagePlan: (n: number) => `规划第 ${n} 页`, pageRender: (n: number) => `生成第 ${n} 页`, stages: {
@@ -108,7 +113,12 @@ export const copy = {
   },
   en: {
     nav: { paper: 'Figure', ppt: 'Slide', settings: 'Settings' },
-    simple: { label: 'Simple mode', hint: 'Skip the drawing model and output the final drawing prompt only' },
+    simple: {
+      label: 'Simple mode',
+      hint: 'Skip the drawing model and output the final drawing prompt only',
+      notice: 'The result is a drawing prompt, not an image. This mode skips the Implement model. It is for people without an image API: take the prompt to the web and finish the picture there.',
+      ack: 'I understand'
+    },
     brandSub: 'figure / slide',
     common: {
       protocol: 'Protocol',
@@ -125,7 +135,7 @@ export const copy = {
       noFile: 'No file',
       uploadedFiles: 'Uploaded'
     },
-    settings: { design: 'Design', implement: 'Implement', search: 'Search', searchHint: "Slide visual grounding search. duckduckgo needs no key and no URL (its endpoint is fixed); tavily needs an API key; grok_search is an OpenAI-compatible chat completions endpoint (grok2api is exactly that): fill in a model ID that carries x_search / web_search itself (e.g. grok-build-0.1). Each protocol keeps its own settings: switching protocols neither overwrites nor carries over the others. duckduckgo reads its no-JS page, so an anti-bot challenge fails the job — for regular use prefer tavily or grok_search.", proxyAndConcurrency: 'Proxy & concurrency', proxy: 'Proxy', proxyHint: 'Local proxy URL, e.g. http://127.0.0.1:7890. Leave empty to disable explicit proxy.', concurrency: 'Slide concurrency', concurrencyHint: 'Leave empty to follow the current Slide page count; actual concurrency will not exceed pages. Prefer image concurrency = 1 to reduce 502s.', pagePlanConcurrency: 'Plan workers', imageConcurrency: 'Image workers', defaultByPages: 'default=pages', size: 'Size', quality: 'Quality', format: 'Format', ratio: 'Ratio', clarity: 'Sharpness', tendency: 'Quality', version: 'Version', timeout: 'Timeout (s)', timeoutHint: 'Sync image APIs can be slow; implement often needs 600–900s. grok_search makes the upstream model search the web, so give it ≥120s.', retries: 'Retries', maxResults: 'Results', stream: 'Stream', streamOn: 'On', keySet: 'Key set', keyNone: 'No key', proxySet: 'Proxy set', proxyNone: 'No proxy', notSet: 'Not set' },
+    settings: { design: 'Design', implement: 'Implement', search: 'Search', proxyAndConcurrency: 'Proxy & concurrency', proxy: 'Proxy', concurrency: 'Slide concurrency', pagePlanConcurrency: 'Plan workers', imageConcurrency: 'Image workers', defaultByPages: 'default=pages', size: 'Size', quality: 'Quality', format: 'Format', ratio: 'Ratio', clarity: 'Sharpness', tendency: 'Quality', version: 'Version', timeout: 'Timeout (s)', retries: 'Retries', maxResults: 'Results', stream: 'Stream', streamOn: 'On', keySet: 'Key set', keyNone: 'No key', proxySet: 'Proxy set', proxyNone: 'No proxy', notSet: 'Not set' },
     paper: { title: 'Figure', intro: 'Choose templates as few-shot visual references.', figureTitle: 'Title', description: 'Method', ratio: 'Ratio', fidelity: 'Layout', strength: 'Style', custom: 'Rules', customHint: 'Optional constraints for banned elements, style emphasis, text limits, or review requirements.', generate: 'Generate', generating: 'Generating…', search: 'Search', kind: 'Type', inherited: 'Template', submitted: 'Figure job submitted' },
     ppt: { title: 'Slide', intro: 'Upload a template, analyze the master, then generate pages.', template: 'Master', pages: 'Pages', material: 'Material', materialFile: 'Files', materialHint: 'Enter text or upload pdf, docx, txt, md, csv, and other common materials.', custom: 'Rules', customHint: 'Optional constraints for page structure, banned elements, terms, colors, or focus.', generate: 'Generate', generating: 'Generating…', submitted: 'Slide job submitted', uploading: 'Uploading...', uploaded: 'Uploaded' },
     result: { title: 'Result', waiting: 'Waiting', progress: 'Progress', current: 'Current', step: 'Current step', failed: 'Failed', completed: 'Completed', queued: 'Queued', running: 'Running', cancelled: 'Stopped', preview: 'Preview', download: 'Download', of: '/', elapsed: 'Elapsed', stop: 'Stop job', stopping: 'Stopping…', retry: 'Retry', resume: 'Continue', resuming: 'Resuming…', resumeFailed: 'Could not continue', stopped: 'Job stopped', stopFailed: 'Stop failed', saveFailed: 'Save failed', previewFailed: 'Preview failed', editWorkbench: 'Edit in workbench', errorTitle: 'Failure diagnosis', errorRole: 'Related configuration', errorProfile: 'Profile', errorModel: 'Model', errorEndpoint: 'Endpoint', errorStatus: 'HTTP status', errorStage: 'Failed stage', errorSuggestion: 'Suggested action', flowLog: 'Generation steps', searchStage: 'Search', designStage: 'Design', implementStage: 'Implement', searchHint: 'Original elements, descriptions and reference sources.', designHint: 'Master analysis, outline and content planning.', implementEmpty: 'No final output yet.', flowQuery: (n: number) => `Query ${n}`, queryContent: 'Query', queryResult: 'Query results', stepEmpty: 'This step returned nothing', stepStreaming: 'Receiving…', pagePrep: (n: number) => `Prepare page ${n}`, pagePlan: (n: number) => `Plan page ${n}`, pageRender: (n: number) => `Render page ${n}`, stages: {
@@ -583,21 +593,54 @@ export function SimpleModeSwitch({
   on,
   label,
   hint,
+  notice,
+  ack,
   onChange
 }: {
   on: boolean;
   label: string;
   hint: string;
+  notice: string;
+  ack: string;
   onChange: (next: boolean) => void;
 }) {
+  const [open, setOpen] = useState(false);
+  const ackButton = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (on && !simpleModeAcknowledged()) setOpen(true);
+  }, [on]);
+  useEffect(() => {
+    if (open) ackButton.current?.focus();
+  }, [open]);
   return (
-    <label className="simple-switch" title={hint}>
-      <input type="checkbox" checked={on} onChange={(event) => onChange(event.target.checked)} />
-      <span className="simple-switch-track" aria-hidden="true">
-        <span className="simple-switch-thumb" />
-      </span>
-      <span className="simple-switch-label">{label}</span>
-    </label>
+    <>
+      <label className="simple-switch" title={hint}>
+        <input type="checkbox" checked={on} onChange={(event) => onChange(event.target.checked)} />
+        <span className="simple-switch-track" aria-hidden="true">
+          <span className="simple-switch-thumb" />
+        </span>
+        <span className="simple-switch-label">{label}</span>
+      </label>
+      {open && (
+        <div className="simple-ack" role="dialog" aria-modal="true" aria-labelledby="simple-ack-title">
+          <div className="simple-ack-card">
+            <h2 id="simple-ack-title">{label}</h2>
+            <p>{notice}</p>
+            <button
+              ref={ackButton}
+              type="button"
+              className="simple-ack-btn"
+              onClick={() => {
+                acknowledgeSimpleMode();
+                setOpen(false);
+              }}
+            >
+              {ack}
+            </button>
+          </div>
+        </div>
+      )}
+    </>
   );
 }
 
@@ -662,6 +705,8 @@ export function App() {
               on={simpleMode}
               label={t.simple.label}
               hint={t.simple.hint}
+              notice={t.simple.notice}
+              ack={t.simple.ack}
               onChange={(next) => {
                 saveSimpleMode(next);
                 setSimpleMode(next);
@@ -854,7 +899,6 @@ export function Settings({
           onChange={upsert}
           onProtocolChange={(protocol) => onChange(withSearchProtocol(config, protocol))}
           t={t}
-          hint={t.settings.searchHint}
         />
       </SettingsSection>
 
@@ -874,7 +918,6 @@ export function Settings({
               onChange={(event) => patchConfig({ proxy_url: event.target.value })}
             />
           </Field>
-          <p className="settings-side-note">{t.settings.proxyHint}</p>
         </div>
         <div className="settings-side-divider" aria-hidden="true" />
         <div className="settings-side-block">
@@ -901,7 +944,6 @@ export function Settings({
               />
             </Field>
           </div>
-          <p className="settings-side-note">{t.settings.concurrencyHint}</p>
         </div>
       </SettingsSection>
 
@@ -1008,6 +1050,16 @@ function ModelEditor({
           )}
         </select>
       </Field>
+      {isSearch && profile.protocol === 'duckduckgo' && (
+        <Field label={t.settings.proxy}>
+          <input
+            value={profile.proxy_url ?? ''}
+            placeholder="http://127.0.0.1:7890"
+            spellCheck={false}
+            onChange={(event) => patch({ proxy_url: event.target.value })}
+          />
+        </Field>
+      )}
       {(!isSearch || !searchNeedsNoSetup(profile.protocol)) && (
         <Field label={t.common.baseUrl}>
           <input
@@ -1036,7 +1088,7 @@ function ModelEditor({
         </Field>
       )}
       <div className="field-row">
-        <Field label={t.settings.timeout} hint={isImplement ? t.settings.timeoutHint : undefined}>
+        <Field label={t.settings.timeout}>
           <IntegerInput
             value={profile.timeout_seconds}
             min={5}
@@ -2040,6 +2092,7 @@ function defaultSearch(): ModelProfile {
     protocol: 'duckduckgo',
     base_url: '',
     model: '',
+    proxy_url: '',
     headers: {},
     timeout_seconds: 120,
     max_retries: 1,

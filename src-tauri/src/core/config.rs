@@ -42,6 +42,9 @@ pub struct ModelProfile {
     pub output_defaults: serde_json::Map<String, serde_json::Value>,
     pub has_api_key: Option<bool>,
     pub api_key_hint: Option<String>,
+    /// 只对 duckduckgo 有意义：有值时优先于应用级 `proxy_url`。
+    #[serde(default)]
+    pub proxy_url: Option<String>,
 }
 
 impl ModelProfile {
@@ -193,6 +196,15 @@ fn normalize_config(mut incoming: AppConfig, existing: Option<AppConfig>) -> App
         profile.api_key_hint = None;
     }
     ensure_search_profile(&mut incoming);
+    for profile in &mut incoming.model_profiles {
+        // 代理栏只属于 duckduckgo。其它协议清掉，避免换协议后还留着一份看不见的地址。
+        profile.proxy_url = if profile.role == "search" && profile.protocol == DUCKDUCKGO_PROTOCOL
+        {
+            normalize_proxy_url(profile.proxy_url.clone())
+        } else {
+            None
+        };
+    }
     incoming
 }
 
@@ -389,6 +401,7 @@ fn default_search() -> ModelProfile {
         output_defaults,
         has_api_key: Some(false),
         api_key_hint: None,
+        proxy_url: None,
     }
 }
 
@@ -408,6 +421,7 @@ fn default_design() -> ModelProfile {
         output_defaults: serde_json::Map::new(),
         has_api_key: Some(false),
         api_key_hint: None,
+        proxy_url: None,
     }
 }
 
@@ -443,6 +457,7 @@ fn default_implement() -> ModelProfile {
         output_defaults,
         has_api_key: Some(false),
         api_key_hint: None,
+        proxy_url: None,
     }
 }
 

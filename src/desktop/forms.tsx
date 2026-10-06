@@ -141,6 +141,7 @@ function GrowField({
         className="dp-ta-fill"
         placeholder={hint}
         value={value}
+        spellCheck={false}
         onChange={(event) => onChange(event.target.value)}
       />
     </div>
@@ -377,7 +378,7 @@ export function FigureForm({
         }
       >
         <DField label={t.paper.figureTitle} span>
-          <input value={title} onChange={(event) => patch({ title: event.target.value })} />
+          <input value={title} spellCheck={false} onChange={(event) => patch({ title: event.target.value })} />
         </DField>
         <GrowField
           label={t.paper.description}

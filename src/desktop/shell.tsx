@@ -70,7 +70,7 @@ function paneClass(id: Page, current: Page, viewTransition: boolean): string {
   return [
     'desktop-pane',
     active ? 'is-active' : '',
-    active && id === 'history' ? 'clips' : '',
+    id === 'history' ? 'clips' : '',
     active && viewTransition ? 'has-view-transition' : ''
   ]
     .filter(Boolean)
@@ -100,6 +100,8 @@ export function DesktopApp() {
   const [workbenchOpen, setWorkbenchOpen] = useState(false);
   const [workbenchSummary, setWorkbenchSummary] = useState<WorkbenchSummary>({ summary: '' });
   const workbenchLeaveGuard = useRef<LeaveGuard | null>(null);
+  const pageRef = useRef(page);
+  pageRef.current = page;
   async function deleteSettled(job: JobRecord, refresh?: () => void) {
     try {
       await deleteJob(job.id);
@@ -145,14 +147,17 @@ export function DesktopApp() {
   const t = copy[lang];
   const d = desktopCopy[lang];
 
-  const showPage = (nextPage: Page) => {
+  const showPage = useCallback((nextPage: Page) => {
     setPage(nextPage);
     setVisited((current) => (current.has(nextPage) ? current : new Set(current).add(nextPage)));
-  };
+  }, []);
 
-  const transitionToPage = async (nextPage: Page): Promise<boolean> => {
-    if (nextPage === page) return true;
-    if (page === 'workbench' && workbenchLeaveGuard.current && !(await workbenchLeaveGuard.current())) return false;
+  // Reads the page through a ref so a handler created for one render still
+  // sees the page the user is on. Otherwise memoized pages would keep a stale
+  // "already there" check and ignore the next click.
+  const transitionToPage = useCallback(async (nextPage: Page): Promise<boolean> => {
+    if (nextPage === pageRef.current) return true;
+    if (pageRef.current === 'workbench' && workbenchLeaveGuard.current && !(await workbenchLeaveGuard.current())) return false;
     if (supportsViewTransitions && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
       (document as any).startViewTransition(() => {
         showPage(nextPage);
@@ -161,12 +166,12 @@ export function DesktopApp() {
       showPage(nextPage);
     }
     return true;
-  };
+  }, [showPage]);
 
-  const openWorkbench = async (assetId: string) => {
+  const openWorkbench = useCallback(async (assetId: string) => {
     if (!(await transitionToPage('workbench'))) return;
     setWorkbenchRequest({ assetId, token: Date.now() });
-  };
+  }, [transitionToPage]);
 
   const registerWorkbenchLeaveGuard = useCallback((guard: LeaveGuard | null) => {
     workbenchLeaveGuard.current = guard;
@@ -364,6 +369,88 @@ export function DesktopApp() {
 
   const head = pageHead[page];
 
+  // These close over the latest handler but keep a stable identity, so a page
+  // switch does not rebuild the history grid just to hand it a new callback.
+  const openJobRef = useRef(openJob);
+  const rerunJobRef = useRef(rerunJob);
+  const deleteSettledRef = useRef(deleteSettled);
+  openJobRef.current = openJob;
+  rerunJobRef.current = rerunJob;
+  deleteSettledRef.current = deleteSettled;
+  const stableOpenJob = useCallback((job: JobRecord) => {
+    void openJobRef.current(job);
+  }, []);
+  const stableRerun = useCallback((job: JobRecord) => {
+    void rerunJobRef.current(job);
+  }, []);
+  const stableDelete = useCallback((job: JobRecord, refresh: () => void) => {
+    void deleteSettledRef.current(job, refresh);
+  }, []);
+
+  // The element identity is what skips reconciliation. `page` is intentionally
+  // not a dependency: switching panes must not re-render the form or the grid.
+  const paperView = useMemo(() => (
+    <div className="task-page">
+      <TaskStrip
+        book={figureBook}
+        d={d}
+        formTitle={(form) => form.title}
+        onSelect={(id) => setFigureBook((book) => selectTab(book, id))}
+        onAdd={() => setFigureBook((book) => addTab(book, defaultFigureForm))}
+        onClose={(id) => setFigureBook((book) => closeTab(book, id, defaultFigureForm))}
+      />
+      <FigureForm
+        key={figureTab.id}
+        simpleMode={simpleMode}
+        state={figureTab.form}
+        onState={(next) => setFigureBook((book) => patchTab(book, figureTab.id, (tab) => ({ form: next(tab.form) })))}
+        job={figureTab.job}
+        onJob={(job) => setFigureBook((book) => patchTab(book, figureTab.id, () => ({ job })))}
+        onMessage={showMessage}
+        onGoTemplates={() => void transitionToPage('templates')}
+        onOpenWorkbench={(assetId) => void openWorkbench(assetId)}
+        t={t}
+        d={d}
+      />
+    </div>
+  ), [d, figureBook, figureTab, openWorkbench, showMessage, simpleMode, t, transitionToPage]);
+
+  const slideView = useMemo(() => (
+    <div className="task-page">
+      <TaskStrip
+        book={slideBook}
+        d={d}
+        formTitle={(form) => form.material}
+        onSelect={(id) => setSlideBook((book) => selectTab(book, id))}
+        onAdd={() => setSlideBook((book) => addTab(book, defaultSlideForm))}
+        onClose={(id) => setSlideBook((book) => closeTab(book, id, defaultSlideForm))}
+      />
+      <SlideForm
+        key={slideTab.id}
+        simpleMode={simpleMode}
+        state={slideTab.form}
+        onState={(next) => setSlideBook((book) => patchTab(book, slideTab.id, (tab) => ({ form: next(tab.form) })))}
+        job={slideTab.job}
+        onJob={(job) => setSlideBook((book) => patchTab(book, slideTab.id, () => ({ job })))}
+        onMessage={showMessage}
+        onGoTemplates={() => void transitionToPage('templates')}
+        onOpenWorkbench={(assetId) => void openWorkbench(assetId)}
+        t={t}
+        d={d}
+      />
+    </div>
+  ), [d, openWorkbench, showMessage, simpleMode, slideBook, slideTab, t, transitionToPage]);
+
+  const historyView = useMemo(() => (
+    <HistoryPage
+      d={d}
+      onOpen={stableOpenJob}
+      onDelete={stableDelete}
+      onRerun={stableRerun}
+      onOpenWorkbench={(assetId) => void openWorkbench(assetId)}
+    />
+  ), [d, openWorkbench, stableDelete, stableOpenJob, stableRerun]);
+
   return (
     <div className="desktop-shell">
       <aside className="desktop-rail">
@@ -445,83 +532,35 @@ export function DesktopApp() {
             on={simpleMode}
             label={d.simple.label}
             hint={d.simple.hint}
+            notice={d.simple.notice}
+            ack={d.simple.ack}
             onChange={changeSimpleMode}
           />
         </div>
 
         <div className="desktop-page">
           {visited.has('paper') && (
-            <div className={paneClass('paper', page, supportsViewTransitions)}>
-              <div className="task-page">
-                <TaskStrip
-                  book={figureBook}
-                  d={d}
-                  formTitle={(form) => form.title}
-                  onSelect={(id) => setFigureBook((book) => selectTab(book, id))}
-                  onAdd={() => setFigureBook((book) => addTab(book, defaultFigureForm))}
-                  onClose={(id) => setFigureBook((book) => closeTab(book, id, defaultFigureForm))}
-                />
-                <FigureForm
-                  key={figureTab.id}
-                  simpleMode={simpleMode}
-                  state={figureTab.form}
-                  onState={(next) => setFigureBook((book) => patchTab(book, figureTab.id, (tab) => ({ form: next(tab.form) })))}
-                  job={figureTab.job}
-                  onJob={(job) => setFigureBook((book) => patchTab(book, figureTab.id, () => ({ job })))}
-                  onMessage={showMessage}
-                  onGoTemplates={() => void transitionToPage('templates')}
-                  onOpenWorkbench={(assetId) => void openWorkbench(assetId)}
-                  t={t}
-                  d={d}
-                />
-              </div>
+            <div className={paneClass('paper', page, supportsViewTransitions)} inert={page !== 'paper'}>
+              {paperView}
             </div>
           )}
           {visited.has('ppt') && (
-            <div className={paneClass('ppt', page, supportsViewTransitions)}>
-              <div className="task-page">
-                <TaskStrip
-                  book={slideBook}
-                  d={d}
-                  formTitle={(form) => form.material}
-                  onSelect={(id) => setSlideBook((book) => selectTab(book, id))}
-                  onAdd={() => setSlideBook((book) => addTab(book, defaultSlideForm))}
-                  onClose={(id) => setSlideBook((book) => closeTab(book, id, defaultSlideForm))}
-                />
-                <SlideForm
-                  key={slideTab.id}
-                  simpleMode={simpleMode}
-                  state={slideTab.form}
-                  onState={(next) => setSlideBook((book) => patchTab(book, slideTab.id, (tab) => ({ form: next(tab.form) })))}
-                  job={slideTab.job}
-                  onJob={(job) => setSlideBook((book) => patchTab(book, slideTab.id, () => ({ job })))}
-                  onMessage={showMessage}
-                  onGoTemplates={() => void transitionToPage('templates')}
-                  onOpenWorkbench={(assetId) => void openWorkbench(assetId)}
-                  t={t}
-                  d={d}
-                />
-              </div>
+            <div className={paneClass('ppt', page, supportsViewTransitions)} inert={page !== 'ppt'}>
+              {slideView}
             </div>
           )}
           {visited.has('templates') && (
-            <div className={paneClass('templates', page, supportsViewTransitions)}>
+            <div className={paneClass('templates', page, supportsViewTransitions)} inert={page !== 'templates'}>
               <TemplateLibrary t={d} onMessage={showMessage} />
             </div>
           )}
           {visited.has('history') && (
-            <div className={paneClass('history', page, supportsViewTransitions)}>
-              <HistoryPage
-                d={d}
-                onOpen={openJob}
-                onDelete={(job, refresh) => deleteSettled(job, refresh)}
-                onRerun={rerunJob}
-                onOpenWorkbench={(assetId) => void openWorkbench(assetId)}
-              />
+            <div className={paneClass('history', page, supportsViewTransitions)} inert={page !== 'history'}>
+              {historyView}
             </div>
           )}
           {visited.has('workbench') && (
-            <div className={paneClass('workbench', page, supportsViewTransitions)}>
+            <div className={paneClass('workbench', page, supportsViewTransitions)} inert={page !== 'workbench'}>
               <WorkbenchPage
                 lang={lang}
                 request={workbenchRequest}
@@ -532,7 +571,7 @@ export function DesktopApp() {
             </div>
           )}
           {visited.has('settings') && (
-            <div className={paneClass('settings', page, supportsViewTransitions)}>
+            <div className={paneClass('settings', page, supportsViewTransitions)} inert={page !== 'settings'}>
               <SettingsPane>
                 <Settings
                   config={config}
@@ -556,7 +595,7 @@ export function DesktopApp() {
             </div>
           )}
           {visited.has('about') && (
-            <div className={paneClass('about', page, supportsViewTransitions)}>
+            <div className={paneClass('about', page, supportsViewTransitions)} inert={page !== 'about'}>
               <AboutPage
                 d={d}
                 version={packageMetadata.version}

@@ -231,6 +231,7 @@ fn profile(url: &str, timeout: i64, retries: i64) -> ModelProfile {
         output_defaults: Map::new(),
         has_api_key: None,
         api_key_hint: None,
+        proxy_url: None,
     }
 }
 
@@ -434,6 +435,19 @@ async fn environment_proxies_are_ignored_without_an_explicit_setting() {
             .is_err(),
         "环境里的代理不该被采用"
     );
+}
+
+#[test]
+fn duckduckgo_proxy_prefers_its_own_setting_over_the_app_proxy() {
+    assert_eq!(
+        duckduckgo_proxy(Some("http://127.0.0.1:7890"), Some("http://app:1")).as_deref(),
+        Some("http://127.0.0.1:7890")
+    );
+    assert_eq!(
+        duckduckgo_proxy(None, Some(" http://app:1 ")).as_deref(),
+        Some("http://app:1")
+    );
+    assert_eq!(duckduckgo_proxy(Some("  "), Some("")), None);
 }
 
 #[test]

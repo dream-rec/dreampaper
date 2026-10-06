@@ -4,6 +4,8 @@
 
 ## v0.2.1
 
+自本版本起 **Web 界面暂停维护，只维护桌面端**（Windows 安装包 / 便携包、macOS、Ubuntu 24.04 的 `.deb`）。仓库里的网页入口仍可在本地打开，但不再随版本修 bug 或加功能；下面的行为以桌面端为准。
+
 Linux Debian 发布、全局简单模式，以及适配 grok2api v3 的 Grok 搜索协议。
 
 - **检索报文可见**。`grok_search` 每次检索实际发出去的查询内容与上游原文都会写进任务记录，并在结果卡片的「生成过程」里按执行顺序显示为一行可折叠详情（查询内容 / 查询结果两块）；失败的那次调用同样记录，排查超时、鉴权与工具声明问题不再只能看最终错误。桌面端（Rust）与 Web 后端（Python）行为一致，步骤名为 `search_request_<n>` / `search_response_<n>`。
@@ -34,7 +36,12 @@ Linux Debian 发布、全局简单模式，以及适配 grok2api v3 的 Grok 搜
 - **最终提示词改为必须落盘**。简单模式的产物只有提示词，写入失败时任务判定为失败，不再沿用过程日志忽略写入错误的做法；实时事件只在写入成功之后发出，避免前端显示并未保存的内容。
 - **版本同步补齐锁文件**。`.github/scripts/set-version.mjs` 同时更新主应用 `Cargo.lock` 的版本条目，打标签时不会因版本改动让 `cargo test --locked` 失败。
 - **发布验收扩展到五类**。归集与草稿从四类产物改为五类，Linux 缺失时同样阻止生成草稿。
-- **Linux 桌面端切换页面闪退**。WebKitGTK 2.50 的 View Transition 实现在 Linux 上会让进程 SIGSEGV（[tauri-apps/tauri#14721](https://github.com/tauri-apps/tauri/issues/14721)）；桌面端不再调用 View Transition API，改用原有 CSS 过渡，浏览器里仍保留原生过渡。
+- **Linux 桌面端切换页面闪退与卡顿**。WebKitGTK 2.50 的 View Transition 实现在 Linux 上会让进程 SIGSEGV（[tauri-apps/tauri#14721](https://github.com/tauri-apps/tauri/issues/14721)）；桌面端不再调用该 API，也不再对整页做透明度过渡、不再用 `grid-template-rows` 动画展开设置项。这两种动画都会让 WebKit 在主线程上逐帧重排，切页和折叠设置都会顿一下。
+- **DuckDuckGo 单独配置代理**。Search 里选 `duckduckgo` 时多一个代理栏，只给这一协议用，优先于「代理与并发」里的总代理；两者都空则直连。不读取 shell 的 `HTTPS_PROXY` / `HTTP_PROXY`。直连超时的错误会带上原因，而不只是「发送失败」。
+- **简单模式首次说明**。第一次处于开启状态时弹出说明：结果是制图提示词而不是图片，绕过 Implement model，适合没有制图 API 的用户把提示词拿到网页端生图。必须点「我已知晓」才会关掉，之后不再出现。
+- **设置页不再附带字段说明**。协议介绍、代理与并发的补充说明、超时建议等提示文案全部去掉，只留字段本身。
+- **模板列表改为缩略图**。选择网格不再把生成分辨率的原图解码进 WebKit；送给模型的仍是磁盘上的原图。
+- **Search 行箭头对齐**。`duckduckgo` 没有右侧徽章时，箭头仍固定在最后一列，与其他设置行的箭头对齐。
 
 ## v0.2.0
 

@@ -251,6 +251,55 @@ button {
   white-space: nowrap;
 }
 
+.simple-ack {
+  position: fixed;
+  z-index: 200;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(22, 24, 32, 0.46);
+}
+
+.simple-ack-card {
+  width: min(420px, 100%);
+  display: grid;
+  gap: 14px;
+  padding: 22px 22px 18px;
+  border-radius: 18px;
+  background: #fff;
+  color: #1d2029;
+  box-shadow: 0 18px 44px rgba(16, 20, 28, 0.22);
+}
+
+.simple-ack-card h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 680;
+}
+
+.simple-ack-card p {
+  margin: 0;
+  color: #3c4450;
+  font-size: 13.5px;
+  font-weight: 500;
+  line-height: 1.55;
+}
+
+.simple-ack-btn {
+  justify-self: end;
+  min-height: 36px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: 999px;
+  background: #b45df2;
+  color: #fff;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 680;
+  cursor: pointer;
+}
+
 .nav button,
 .primary,
 .lang-toggle,
@@ -380,7 +429,9 @@ button {
 
 .settings-section-header {
   display: grid;
-  grid-template-columns: minmax(0, auto) minmax(0, 1fr) auto auto;
+  /* The last track is always the chevron. A missing badge must not pull it
+     into the badge column, or that row's arrow sits one gap left of the rest. */
+  grid-template-columns: minmax(0, auto) minmax(0, 1fr) auto 24px;
   gap: var(--space-3);
   align-items: center;
   width: 100%;
@@ -415,6 +466,8 @@ button {
 }
 
 .settings-section-badge {
+  grid-column: 3;
+  justify-self: end;
   flex: 0 0 auto;
   padding: 4px 10px;
   border-radius: 999px;
@@ -434,14 +487,16 @@ button {
 }
 
 .settings-section-chevron {
+  grid-column: 4;
   display: grid;
   width: 24px;
   height: 24px;
   place-items: center;
+  justify-self: center;
   color: #8b939c;
   font-size: 1.4rem;
   line-height: 1;
-  transition: transform 320ms cubic-bezier(0.22, 1, 0.36, 1), color 200ms ease;
+  transition: transform 160ms ease, color 160ms ease;
 }
 
 .settings-section.open .settings-section-chevron {
@@ -453,19 +508,18 @@ button {
   color: var(--accent-deep);
 }
 
+/* Opening used to interpolate grid-template-rows for 340ms. WebKit lays the
+   section out on every frame of that, which is the hitch when a row expands. */
 .settings-section-panel {
-  display: grid;
-  grid-template-rows: 0fr;
-  transition: grid-template-rows 340ms cubic-bezier(0.22, 1, 0.36, 1);
+  display: none;
 }
 
 .settings-section.open .settings-section-panel {
-  grid-template-rows: 1fr;
+  display: block;
 }
 
 .settings-section-panel-inner {
   min-height: 0;
-  overflow: hidden;
 }
 
 .settings-section-body {
@@ -474,15 +528,6 @@ button {
   align-content: start;
   min-width: 0;
   padding: var(--space-2) var(--space-5) var(--space-5);
-  opacity: 0;
-  transform: translateY(-6px);
-  transition: opacity 180ms ease, transform 300ms cubic-bezier(0.22, 1, 0.36, 1);
-}
-
-.settings-section.open .settings-section-body {
-  opacity: 1;
-  transform: translateY(0);
-  transition-delay: 70ms;
 }
 
 .model-fields {

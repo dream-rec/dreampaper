@@ -9,6 +9,15 @@ use uuid::Uuid;
 use crate::error::{AppError, AppResult};
 
 use super::asset::{guess_mime, protocol_url, sanitize_filename};
+
+/// 列表和选择网格只展示缩略图。原图经常是生成分辨率，整张解码进 WebKit
+/// 会占一块显存；制图流程刷新界面时这块纹理被反复上传，GPU 占用就忽高忽低。
+/// 送给模型的仍是磁盘上的原图，不走这个 URL。
+const LIST_THUMB_WIDTH: u32 = 400;
+
+fn list_image_url(id: &str) -> String {
+    format!("{}?w={LIST_THUMB_WIDTH}", protocol_url("dp-template", id))
+}
 use super::store::Store;
 
 #[derive(Clone, Debug, Serialize)]
@@ -97,7 +106,7 @@ impl<'a> TemplateService<'a> {
             |row| {
                 let id: String = row.get(0)?;
                 Ok(TemplateSummary {
-                    image_url: protocol_url("dp-template", &id),
+                    image_url: list_image_url(&id),
                     id,
                     source_id: row.get(1)?,
                     kind: row.get(2)?,
@@ -170,7 +179,7 @@ impl<'a> TemplateService<'a> {
             ],
         )?;
         Ok(TemplateSummary {
-            image_url: protocol_url("dp-template", &id),
+            image_url: list_image_url(&id),
             id,
             source_id: filename,
             kind,

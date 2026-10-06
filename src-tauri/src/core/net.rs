@@ -261,6 +261,16 @@ pub(crate) fn configured_proxy(proxy_url: Option<&str>) -> Option<&str> {
     proxy_url.map(str::trim).filter(|value| !value.is_empty())
 }
 
+/// DuckDuckGo 自己的代理优先于应用级代理。两者都空则直连，不读环境变量。
+pub(crate) fn duckduckgo_proxy(
+    profile_proxy: Option<&str>,
+    settings_proxy: Option<&str>,
+) -> Option<String> {
+    configured_proxy(profile_proxy)
+        .or_else(|| configured_proxy(settings_proxy))
+        .map(str::to_string)
+}
+
 pub fn build_client(
     read_timeout_seconds: u64,
     proxy_url: Option<&str>,

@@ -771,6 +771,7 @@ mod tests {
             output_defaults,
             has_api_key: None,
             api_key_hint: None,
+            proxy_url: None,
         }
     }
 
