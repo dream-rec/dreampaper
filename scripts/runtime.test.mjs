@@ -235,6 +235,7 @@ test('缺少第五个产物时草稿步骤必须阻断，且一次远端调用�
       env: {
         ...process.env,
         PATH: `${gh.bin}${delimiter}${process.env.PATH}`,
+        Path: `${gh.bin}${delimiter}${process.env.Path || process.env.PATH}`,
         // .EXE 排在 .CMD 前面时，前面目录里的 gh.cmd 仍会输给后面的 gh.exe。
         ...(process.platform === 'win32' ? { PATHEXT: `.CMD;${process.env.PATHEXT || '.EXE'}` } : {}),
         GITHUB_REF_NAME: 'v0.2.1', GITHUB_REPOSITORY: 'owner/repo', GITHUB_SHA: '0'.repeat(40)
