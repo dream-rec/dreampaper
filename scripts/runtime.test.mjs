@@ -3,7 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { delimiter, join } from 'node:path';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { debControlFields, debControlProblems, debPackageName, digest, filesIn, linuxBinaryProblems, locked, root, targetInfo, verifyRuntime } from './runtime.mjs';
 
@@ -200,7 +200,8 @@ test('运行依赖只允许系统库目录或包内，含 $ORIGIN 归属复核',
 function fakeGh(directory) {
   const bin = join(directory, 'bin');
   mkdirSync(bin, { recursive: true });
-  writeFileSync(join(bin, 'gh.js'), [
+  const script = join(bin, 'gh.js');
+  writeFileSync(script, [
     "const { appendFileSync, writeFileSync } = require('node:fs');",
     "const { join } = require('node:path');",
     "const marker = join(__dirname, '..', 'calls.txt');",
@@ -210,14 +211,7 @@ function fakeGh(directory) {
     "else if (url.includes('/git/ref/tags/')) process.stdout.write(JSON.stringify({ object: { type: 'commit', sha: process.env.GITHUB_SHA } }));",
     "else writeFileSync(join(__dirname, '..', 'notes.txt'), '');"
   ].join('\n'));
-  // Windows 的 CreateProcess 会按 PATHEXT 先找 gh.exe。runner 上已有真正的
-  // gh.exe，无扩展名的 shell 脚本盖不住它，草稿测试就会打到远端。
-  if (process.platform === 'win32') {
-    writeFileSync(join(bin, 'gh.cmd'), '@echo off\r\nnode "%~dp0gh.js" %*\r\n');
-  } else {
-    writeFileSync(join(bin, 'gh'), '#!/bin/sh\nexec node "$(dirname "$0")/gh.js" "$@"\n', { mode: 0o755 });
-  }
-  return { bin, marker: join(directory, 'calls.txt') };
+  return { script, marker: join(directory, 'calls.txt') };
 }
 
 test('缺少第五个产物时草稿步骤必须阻断，且一次远端调用都不发生', () => {
@@ -234,10 +228,7 @@ test('缺少第五个产物时草稿步骤必须阻断，且一次远端调用�
       encoding: 'utf8',
       env: {
         ...process.env,
-        PATH: `${gh.bin}${delimiter}${process.env.PATH}`,
-        Path: `${gh.bin}${delimiter}${process.env.Path || process.env.PATH}`,
-        // .EXE 排在 .CMD 前面时，前面目录里的 gh.cmd 仍会输给后面的 gh.exe。
-        ...(process.platform === 'win32' ? { PATHEXT: `.CMD;${process.env.PATHEXT || '.EXE'}` } : {}),
+        DREAMPAPER_GH: gh.script,
         GITHUB_REF_NAME: 'v0.2.1', GITHUB_REPOSITORY: 'owner/repo', GITHUB_SHA: '0'.repeat(40)
       }
     });

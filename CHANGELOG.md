@@ -37,7 +37,7 @@ Linux Debian 发布、全局简单模式，以及适配 grok2api v3 的 Grok 搜
 - **版本同步补齐锁文件**。`.github/scripts/set-version.mjs` 同时更新主应用 `Cargo.lock` 的版本条目，打标签时不会因版本改动让 `cargo test --locked` 失败。
 - **发布验收扩展到五类**。归集与草稿从四类产物改为五类，Linux 缺失时同样阻止生成草稿。
 - **离线 OCR 门禁**。正式请求不读环境变量里的代理，门禁却用一个立刻断开的本地代理模拟断网。连通性检查以前走直连，`example.com` 能打开，于是报「离线门禁未阻断网络」。现在这次检查显式走探针注入的代理，识别仍在断网条件下进行。
-- **Windows 草稿测试不再调用真正的 gh**。runner 上已安装 `gh.exe`，测试放在 PATH 前面的无扩展名脚本盖不住它，于是「产物不全不得发布」的检查打到了 GitHub CLI 并因缺少 `GH_TOKEN` 失败。Windows 上改用 `gh.cmd`，并让 `.CMD` 先于 `.EXE` 被找到。
+- **Windows 草稿测试不再调用真正的 gh**。runner 上的 `gh.exe` 比 PATH 里的 `gh.cmd` 更优先，产物检查因此因缺少 `GH_TOKEN` 失败，setup 和便携包都没编出来。测试改为直接指定假的 `gh` 脚本，发布时仍调用系统里的 `gh`。
 - **Windows 对齐版本**。`Cargo.lock` 在 Windows 检出是 CRLF，版本脚本只认 LF，匹配不到 `dreampaper` 的版本行，安装包任务在对齐版本时退出。
 - **Linux ORT 允许 `$ORIGIN`**。1.29 的动态库带相对 `RUNPATH`（`$ORIGIN`，表示库自己所在目录）。验收仍拒绝绝对路径和指向暂存目录之外的 `$ORIGIN`，不再把相对标记误判成构建机路径。
 - **Linux 桌面端切换页面闪退与卡顿**。WebKitGTK 2.50 的 View Transition 实现在 Linux 上会让进程 SIGSEGV（[tauri-apps/tauri#14721](https://github.com/tauri-apps/tauri/issues/14721)）；桌面端不再调用该 API，也不再对整页做透明度过渡、不再用 `grid-template-rows` 动画展开设置项。这两种动画都会让 WebKit 在主线程上逐帧重排，切页和折叠设置都会顿一下。
