@@ -210,8 +210,13 @@ function fakeGh(directory) {
     "else if (url.includes('/git/ref/tags/')) process.stdout.write(JSON.stringify({ object: { type: 'commit', sha: process.env.GITHUB_SHA } }));",
     "else writeFileSync(join(__dirname, '..', 'notes.txt'), '');"
   ].join('\n'));
-  writeFileSync(join(bin, 'gh'), '#!/bin/sh\nexec node "$(dirname "$0")/gh.js" "$@"\n', { mode: 0o755 });
-  writeFileSync(join(bin, 'gh.cmd'), '@node "%~dp0gh.js" %*\r\n');
+  // Windows 的 CreateProcess 会按 PATHEXT 先找 gh.exe。runner 上已有真正的
+  // gh.exe，无扩展名的 shell 脚本盖不住它，草稿测试就会打到远端。
+  if (process.platform === 'win32') {
+    writeFileSync(join(bin, 'gh.cmd'), '@echo off\r\nnode "%~dp0gh.js" %*\r\n');
+  } else {
+    writeFileSync(join(bin, 'gh'), '#!/bin/sh\nexec node "$(dirname "$0")/gh.js" "$@"\n', { mode: 0o755 });
+  }
   return { bin, marker: join(directory, 'calls.txt') };
 }
 
@@ -230,6 +235,8 @@ test('缺少第五个产物时草稿步骤必须阻断，且一次远端调用�
       env: {
         ...process.env,
         PATH: `${gh.bin}${delimiter}${process.env.PATH}`,
+        // .EXE 排在 .CMD 前面时，前面目录里的 gh.cmd 仍会输给后面的 gh.exe。
+        ...(process.platform === 'win32' ? { PATHEXT: `.CMD;${process.env.PATHEXT || '.EXE'}` } : {}),
         GITHUB_REF_NAME: 'v0.2.1', GITHUB_REPOSITORY: 'owner/repo', GITHUB_SHA: '0'.repeat(40)
       }
     });
