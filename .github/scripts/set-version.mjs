@@ -32,9 +32,10 @@ patch("package.json", topLevelVersion);
 
 // CI 用 `cargo test --locked` 跑主应用：Cargo.toml 的版本变了而 Cargo.lock 没跟着变，
 // `--locked` 会直接失败。只改主包条目，OCR 独立 crate 与 ORT 的版本不在这里动。
+// Windows 检出是 CRLF。只写 \n 时，]] 和 name 之间的 \r 会让整段匹配失败。
 patch(
   "src-tauri/Cargo.lock",
-  /(\[\[package\]\]\nname = "dreampaper"\nversion = )"[^"]*"/
+  /(\[\[package\]\]\r?\nname = "dreampaper"\r?\nversion = )"[^"]*"/
 );
 
 

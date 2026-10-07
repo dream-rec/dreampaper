@@ -9,7 +9,7 @@ export const targets = {
   'x86_64-pc-windows-msvc': { platform: 'win32', arch: 'x64', library: 'onnxruntime.dll', suffix: '.exe' },
   'x86_64-apple-darwin': { platform: 'darwin', arch: 'x64', library: 'libonnxruntime.dylib', suffix: '' },
   'aarch64-apple-darwin': { platform: 'darwin', arch: 'arm64', library: 'libonnxruntime.dylib', suffix: '' },
-  // 仅 Ubuntu 24.04 / x86-64：发布资产也只有这一个 Linux 目标。
+  // 在 Ubuntu 22.04 上构建，glibc 能在 22.04 和更新的发行版上加载。只发 x86-64。
   'x86_64-unknown-linux-gnu': { platform: 'linux', arch: 'x64', library: 'libonnxruntime.so', suffix: '', debian_arch: 'amd64' }
 };
 

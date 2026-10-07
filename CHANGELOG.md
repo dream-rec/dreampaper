@@ -4,7 +4,7 @@
 
 ## v0.2.1
 
-自本版本起 **Web 界面暂停维护，只维护桌面端**（Windows 安装包 / 便携包、macOS、Ubuntu 24.04 的 `.deb`）。仓库里的网页入口仍可在本地打开，但不再随版本修 bug 或加功能；下面的行为以桌面端为准。
+自本版本起 **Web 界面暂停维护，只维护桌面端**（Windows 安装包 / 便携包、macOS、Ubuntu 22.04 及以上的 `.deb`）。仓库里的网页入口仍可在本地打开，但不再随版本修 bug 或加功能；下面的行为以桌面端为准。
 
 Linux Debian 发布、全局简单模式，以及适配 grok2api v3 的 Grok 搜索协议。
 
@@ -16,7 +16,7 @@ Linux Debian 发布、全局简单模式，以及适配 grok2api v3 的 Grok 搜
 - **顶部留白收窄**。Windows 与 Linux 使用系统标题栏，此前为 macOS 红绿灯预留的 48px 顶部留白在那里只是空白；两端页面顶部留白收到 16px。
 - **检索阶段永远只用文本**。`grok_search` 等检索请求以用户资料文本为唯一输入，母版截图只进入母版分析这一个 design 调用；两侧都有单测断言检索请求里不得出现 `image_url` / `input_image` / `base64` / `data:image`，且消息体只能是字符串。
 - **阶段卡片按进度出现**。结果卡片不再常驻 Search / Design / Implement 三块空占位：任务进入哪个阶段，哪块卡片才带着插入动画出现（检索卡片出现即代表真的搜过），Search / Design / Implement 三块容器统一底色，内部折叠行与展开的内容各自分层。
-- **Linux 发布（Ubuntu 24.04 x86-64）**。发布流水线新增 `.deb`：包内含 OCR 辅助进程、ONNX Runtime、内置字体与提示词，`Depends` 声明 `libwebkit2gtk-4.1-0`、`libgtk-3-0` 与 `libgomp1`。ORT 在 Linux 原生构建并校验 ELF 架构、动态依赖与 RPATH；验收把 deb 解包到隔离目录，校验包名/版本/架构/依赖与包内引擎摘要，再对最终包执行模型下载、中英文识别与重启离线门禁。仅发布 x86-64，不提供 RPM 与 AppImage。
+- **Linux 发布（Ubuntu 22.04 及以上，x86-64）**。`.deb` 在 Ubuntu 22.04 上构建，以便 glibc 能在 22.04 和 24.04 上加载。包内含 OCR 辅助进程、ONNX Runtime、内置字体与提示词，`Depends` 声明 `libwebkit2gtk-4.1-0`、`libgtk-3-0` 与 `libgomp1`。仅发布 x86-64，不提供 RPM 与 AppImage。
 - **简单模式（Simple Mode）**。顶栏新增全局开关，对科研图与幻灯片同时生效：仍走 design（与可选 search）链路，但不调用制图模型，也不需要 implement 凭据。结果卡片的「生成过程」里多出一行「最终制图提示词」——就是本应交给制图模型的完整提示词，科研图一条，幻灯片全部页面按页码排列，保留换行并支持一键复制。开关随任务快照写入请求，重跑历史任务使用当前开关，已开始的任务不受切换影响。历史记录里的简单模式任务因此天然没有成品图（产物就是提示词），卡片预览改成显示这次选中的参考母版/模板（点击可放大，标题说明“预览：所选母版”），并在标题旁标上绿色的「简单模式」标签；母版被删掉或挪走时退回原来的图标，不会留一张碎图。普通模式没有成品图只说明没跑完，不会拿参考图冒充结果。历史记录页的筛选条新增「运行模式」一档（全部 / 普通模式 / 简单模式），可与类型、状态、搜索叠加使用。
 - **Grok 搜索协议**。搜索角色只保留一个联网协议 `grok_search`——本质上就是 OpenAI 兼容的 chat completions 加上「要求上游模型自己调用联网工具」，[grok2api](https://github.com/chenyme/grok2api) 即此类网关；原来单独的 `openai_chat (search model)` 选项取消，已有配置在读取时并入 `grok_search`。模型名填部署里实际可用的模型 ID（如 `grok-build-0.1`），无前缀要求；请求固定非流式并始终同时声明 `x_search` 与 `web_search` 两种搜索工具（缺哪个补哪个，已配置的原样保留），再要求上游至少调用一种。请求失败（路由、鉴权、HTTP 错误）直接让任务失败，不降级为“没有来源”的结果。DuckDuckGo 与 Tavily 行为不变。
 
@@ -36,6 +36,8 @@ Linux Debian 发布、全局简单模式，以及适配 grok2api v3 的 Grok 搜
 - **最终提示词改为必须落盘**。简单模式的产物只有提示词，写入失败时任务判定为失败，不再沿用过程日志忽略写入错误的做法；实时事件只在写入成功之后发出，避免前端显示并未保存的内容。
 - **版本同步补齐锁文件**。`.github/scripts/set-version.mjs` 同时更新主应用 `Cargo.lock` 的版本条目，打标签时不会因版本改动让 `cargo test --locked` 失败。
 - **发布验收扩展到五类**。归集与草稿从四类产物改为五类，Linux 缺失时同样阻止生成草稿。
+- **离线 OCR 门禁**。正式请求不读环境变量里的代理，门禁却用一个立刻断开的本地代理模拟断网。连通性检查以前走直连，`example.com` 能打开，于是报「离线门禁未阻断网络」。现在这次检查显式走探针注入的代理，识别仍在断网条件下进行。
+- **Windows 对齐版本**。`Cargo.lock` 在 Windows 检出是 CRLF，版本脚本只认 LF，匹配不到 `dreampaper` 的版本行，安装包任务在对齐版本时退出。
 - **Linux ORT 允许 `$ORIGIN`**。1.29 的动态库带相对 `RUNPATH`（`$ORIGIN`，表示库自己所在目录）。验收仍拒绝绝对路径和指向暂存目录之外的 `$ORIGIN`，不再把相对标记误判成构建机路径。
 - **Linux 桌面端切换页面闪退与卡顿**。WebKitGTK 2.50 的 View Transition 实现在 Linux 上会让进程 SIGSEGV（[tauri-apps/tauri#14721](https://github.com/tauri-apps/tauri/issues/14721)）；桌面端不再调用该 API，也不再对整页做透明度过渡、不再用 `grid-template-rows` 动画展开设置项。这两种动画都会让 WebKit 在主线程上逐帧重排，切页和折叠设置都会顿一下。
 - **DuckDuckGo 单独配置代理**。Search 里选 `duckduckgo` 时多一个代理栏，只给这一协议用，优先于「代理与并发」里的总代理；两者都空则直连。不读取 shell 的 `HTTPS_PROXY` / `HTTP_PROXY`。直连超时的错误会带上原因，而不只是「发送失败」。

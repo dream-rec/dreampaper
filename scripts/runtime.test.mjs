@@ -269,6 +269,14 @@ test('升版本只改主包锁文件条目，OCR 版本不动', () => {
     assert.equal(result.status, 0, result.stderr);
     assert.match(readFileSync(join(directory, 'src-tauri/Cargo.lock'), 'utf8'), /name = "dreampaper"\nversion = "0\.9\.9"/);
     assert.match(readFileSync(join(directory, 'src-tauri/Cargo.lock'), 'utf8'), /name = "dreampaper-ocr"\nversion = "0\.1\.0"/);
+    writeFileSync(
+      join(directory, 'src-tauri/Cargo.lock'),
+      '[[package]]\r\nname = "dreampaper"\r\nversion = "0.1.0"\r\ndependencies = [\r\n "dreampaper-ocr",\r\n]\r\n\r\n[[package]]\r\nname = "dreampaper-ocr"\r\nversion = "0.1.0"\r\n'
+    );
+    const crlf = spawnSync(process.execPath, [join(root, '.github/scripts/set-version.mjs'), '0.9.9'], { cwd: directory, encoding: 'utf8' });
+    assert.equal(crlf.status, 0, crlf.stderr);
+    assert.match(readFileSync(join(directory, 'src-tauri/Cargo.lock'), 'utf8'), /name = "dreampaper"\r\nversion = "0\.9\.9"/);
+    assert.match(readFileSync(join(directory, 'src-tauri/Cargo.lock'), 'utf8'), /name = "dreampaper-ocr"\r\nversion = "0\.1\.0"/);
     for (const path of ['package.json', 'src-tauri/tauri.conf.json', 'src-tauri/Cargo.toml']) {
       assert.match(readFileSync(join(directory, path), 'utf8'), /"?0\.9\.9"?/);
     }

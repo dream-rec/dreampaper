@@ -177,9 +177,16 @@ fn run(mode: &str, directory: &Path) -> AppResult<Value> {
             recognize(&sidecar, &packages, &data, directory)
         }
         "offline" => {
+            // 门禁用一个立刻断开的本地代理模拟断网，写在环境变量里。
+            // 正式请求不读这些变量（见 build_client），所以这次连通性检查必须
+            // 把探针注入的代理显式传进去，否则会直连 example.com，误判为没断网。
+            let proxy = ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"]
+                .into_iter()
+                .find_map(|key| std::env::var(key).ok())
+                .filter(|value| !value.trim().is_empty());
             let runtime = tokio::runtime::Runtime::new()?;
             let blocked = runtime.block_on(async {
-                crate::core::net::build_client(5, None)?
+                crate::core::net::build_client(5, proxy.as_deref())?
                     .get("https://example.com")
                     .send()
                     .await

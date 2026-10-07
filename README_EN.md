@@ -91,7 +91,7 @@ Prefer not to set up Python? Grab the [latest release](../../releases/latest). T
 | `dreampaper-*-portable.zip` | Windows portable (extract the complete directory; do not move the EXE alone) |
 | `dreampaper-*-x64-mac.dmg` | macOS Intel |
 | `dreampaper-*-arm64-mac.dmg` | macOS Apple Silicon |
-| `dreampaper-*-amd64.deb` | Ubuntu 24.04 x86-64 (Debian family) |
+| `dreampaper-*-amd64.deb` | Ubuntu 22.04 or newer, x86-64 (Debian family) |
 
 ### First launch
 
@@ -100,7 +100,7 @@ There is no commercial signing certificate: Windows executables are unsigned; ma
 - **macOS**: double-clicking reports an unverified developer. Right-click the app → Open → Open again. One time only.
 - **Windows**: SmartScreen shows "Windows protected your PC". Click "More info" → "Run anyway".
 - The **Windows portable** build requires [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/). Install it if missing, or use the installer. Keep the main EXE, OCR sidecar, `ort/`, fonts and other files together.
-- **Linux**: `sudo apt install ./dreampaper-*-amd64.deb`. The package declares its `libwebkit2gtk-4.1-0`, `libgtk-3-0` and `libgomp1` dependencies for apt to resolve. The build baseline is Ubuntu 24.04 x86-64; older distributions are untested, and no RPM or AppImage is published.
+- **Linux**: `sudo apt install ./dreampaper-*-amd64.deb`. The package declares its `libwebkit2gtk-4.1-0`, `libgtk-3-0` and `libgomp1` dependencies for apt to resolve. It is built on Ubuntu 22.04 x86-64 so it installs on 22.04 and newer. No RPM or AppImage is published.
 
 All five artifacts include the OCR engine, but not the models. Download the approximately 133 MiB model package in Settings once; detection/recognition files fall back between PaddlePaddle's official ModelScope and Hugging Face mirrors, with pinned file sizes and SHA-256 verification. Recognition then works offline without Python or a separate ONNX Runtime installation. Release CI validates actual installed/extracted packages and creates only a draft after all five pass.
 
@@ -116,7 +116,7 @@ The final DMG is assembled by `scripts/bundle.mjs`, which grants the ad-hoc libr
 
 The macOS deployment target is 13.0. Passing on modern CI runners does not establish minimum-version compatibility; macOS 13.0 and the minimum Windows version require separate installed-package testing.
 
-On Linux, ORT is built natively from the pinned commit and checked for target architecture, leftover build-machine paths and dynamic dependencies. The `.deb` is produced by Tauri; the runtime dependencies live in `src-tauri/tauri.linux.conf.json`, and the release gate checks the built package's control fields against that list (it does not assume whether upstream derives defaults). Linux gates run with `LD_LIBRARY_PATH`, `LD_PRELOAD` and `LD_AUDIT` cleared; the build baseline is Ubuntu 24.04 x86-64.
+On Linux, ORT is built natively from the pinned commit and checked for target architecture, leftover build-machine paths and dynamic dependencies. The `.deb` is produced by Tauri; the runtime dependencies live in `src-tauri/tauri.linux.conf.json`, and the release gate checks the built package's control fields against that list (it does not assume whether upstream derives defaults). Linux gates run with `LD_LIBRARY_PATH`, `LD_PRELOAD` and `LD_AUDIT` cleared. The build baseline is Ubuntu 22.04 x86-64, and the package runs on 22.04 and newer.
 
 ### Workbench (desktop)
 

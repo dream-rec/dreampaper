@@ -97,7 +97,7 @@
 | `dreampaper-*-portable.zip` | Windows 便携版（完整解压后运行，勿单独移动 EXE） |
 | `dreampaper-*-x64-mac.dmg` | macOS Intel |
 | `dreampaper-*-arm64-mac.dmg` | macOS Apple Silicon |
-| `dreampaper-*-amd64.deb` | Ubuntu 24.04 x86-64（Debian 系） |
+| `dreampaper-*-amd64.deb` | Ubuntu 22.04 及以上 x86-64（Debian 系） |
 
 ### 首次打开
 
@@ -106,7 +106,7 @@
 - **macOS**：双击提示「无法验证开发者」。右键点 App → 选「打开」→ 再点一次「打开」。只需操作一次。
 - **Windows**：SmartScreen 提示「已保护你的电脑」。点「更多信息」→「仍要运行」。
 - **Windows 便携版**依赖系统已有 [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)。如果缺少，请先安装它，或改用安装版；ZIP 中的主程序、OCR 辅助程序、`ort/`、字体等必须保持完整。
-- **Linux**：`sudo apt install ./dreampaper-*-amd64.deb`。包内已声明 `libwebkit2gtk-4.1-0`、`libgtk-3-0`、`libgomp1` 依赖，由 apt 解析。构建基线为 Ubuntu 24.04 x86-64，更旧的发行版未做实测；不提供 RPM 与 AppImage。
+- **Linux**：`sudo apt install ./dreampaper-*-amd64.deb`。包内已声明 `libwebkit2gtk-4.1-0`、`libgtk-3-0`、`libgomp1` 依赖，由 apt 解析。在 Ubuntu 22.04 x86-64 上构建，可在 22.04 及更新的发行版上安装；不提供 RPM 与 AppImage。
 
 五类产物都随包提供 OCR 推理引擎，不内置模型。首次在设置页下载约 133 MiB 模型；检测/识别模型在 PaddlePaddle 官方 ModelScope 与 Hugging Face 镜像间自动回退，所有文件按锁定大小与 SHA-256 校验，完成后即可离线识别；无需安装 Python 或 ONNX Runtime。引擎/模型不可用时，手工文字、取色修补和裁剪仍可使用。发布流水线必须对五类最终产物执行真实下载和推理门禁，全部通过后才生成草稿，不自动公开。
 
@@ -189,9 +189,9 @@ npm run tauri:build
 
 `gate:ort` 在当前架构从锁定提交构建 CPU 运行时，生成逐文件清单；`sidecar` 严格验证后暂存完整引擎，因此必须先于主程序测试执行。无运行时下载 URL 的平台也可在 CI 原生构建，禁止缺少引擎时降级出包。
 
-GitHub Actions 按 Windows x64、macOS Intel / ARM、Ubuntu 24.04 x86-64 四个平台构建，并从最终 setup 安装目录、portable ZIP 解压目录、DMG 复制出的 App 以及 deb 解包目录执行门禁。手动运行只上传测试产物；`v*` tag 触发的流程在全部通过后生成一个 Release 草稿。运行时来源清单及推理报告保存在 Actions artifacts。
+GitHub Actions 按 Windows x64、macOS Intel / ARM、Ubuntu 22.04 x86-64 四个平台构建，并从最终 setup 安装目录、portable ZIP 解压目录、DMG 复制出的 App 以及 deb 解包目录执行门禁。手动运行只上传测试产物；`v*` tag 触发的流程在全部通过后生成一个 Release 草稿。运行时来源清单及推理报告保存在 Actions artifacts。
 
-Linux 平台从锁定提交原生构建 ORT，并校验目标架构、构建机残留路径与动态依赖；`.deb` 由 Tauri 打包，运行依赖写在 `src-tauri/tauri.linux.conf.json` 里，发布门禁拿这份名单逐项核对最终包的控制字段（不假设上游会不会推导默认依赖）。Linux 验收在清理 `LD_LIBRARY_PATH`、`LD_PRELOAD`、`LD_AUDIT` 的环境里进行；构建基线为 Ubuntu 24.04 x86-64。
+Linux 平台从锁定提交原生构建 ORT，并校验目标架构、构建机残留路径与动态依赖；`.deb` 由 Tauri 打包，运行依赖写在 `src-tauri/tauri.linux.conf.json` 里，发布门禁拿这份名单逐项核对最终包的控制字段（不假设上游会不会推导默认依赖）。Linux 验收在清理 `LD_LIBRARY_PATH`、`LD_PRELOAD`、`LD_AUDIT` 的环境里进行；构建基线为 Ubuntu 22.04 x86-64，产物可在 22.04 及更新的发行版上使用。
 
 macOS 最终 DMG 由 `scripts/bundle.mjs` 封装；仅 OCR 辅助程序具有 ad-hoc 动态库加载例外，主程序保留默认 Hardened Runtime。不得以 Tauri 中间 App 代替该最终包分发。
 
