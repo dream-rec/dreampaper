@@ -48,6 +48,7 @@ Linux Debian 发布、全局简单模式，以及适配 grok2api v3 的 Grok 搜
 - **Search 行箭头对齐**。`duckduckgo` 没有右侧徽章时，箭头仍固定在最后一列，与其他设置行的箭头对齐。
 - **macOS 已打开的页面不再叠在一起**。页面叠在同一格里，隐藏只靠 `content-visibility`。macOS 的 WKWebView 不理会它，科研图上会透出其他页的字和按钮。没打开的页面改为 `visibility: hidden`。Intel 与 Apple Silicon 是同一套界面。
 - **安装版 Linux 不再继承软件绘制开关**。`WEBKIT_DISABLE_COMPOSITING_MODE` 和 `WEBKIT_DISABLE_DMABUF_RENDERER` 常写在 `/etc/environment` 里，从菜单启动的 `.deb` 会带上，WebKit 因此用 CPU 画界面，点击和切页发闷。进程启动 WebKit 前清掉这两项，只影响 DreamPaper。
+- **唯一任务不能删除**。科研图和幻灯片只剩一个任务页时，点关闭会提示「唯一任务，无法删除」，页码不再跳成任务 2、任务 3。有多个任务页时，关闭仍收掉当前页并切到左边那一页。
 
 ## v0.2.0
 

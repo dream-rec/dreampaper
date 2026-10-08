@@ -397,7 +397,7 @@ export function DesktopApp() {
         formTitle={(form) => form.title}
         onSelect={(id) => setFigureBook((book) => selectTab(book, id))}
         onAdd={() => setFigureBook((book) => addTab(book, defaultFigureForm))}
-        onClose={(id) => setFigureBook((book) => closeTab(book, id, defaultFigureForm))}
+        onClose={(id) => setFigureBook((book) => closeTab(book, id))}
       />
       <FigureForm
         key={figureTab.id}
@@ -423,7 +423,7 @@ export function DesktopApp() {
         formTitle={(form) => form.material}
         onSelect={(id) => setSlideBook((book) => selectTab(book, id))}
         onAdd={() => setSlideBook((book) => addTab(book, defaultSlideForm))}
-        onClose={(id) => setSlideBook((book) => closeTab(book, id, defaultSlideForm))}
+        onClose={(id) => setSlideBook((book) => closeTab(book, id))}
       />
       <SlideForm
         key={slideTab.id}
@@ -693,7 +693,7 @@ export function slideFormFrom(payload: unknown, base: SlideFormState, t: Desktop
   };
 }
 
-function TaskStrip<F>({
+export function TaskStrip<F>({
   book,
   d,
   formTitle,
@@ -708,7 +708,19 @@ function TaskStrip<F>({
   onAdd: () => void;
   onClose: (id: string) => void;
 }) {
+  const [onlyNotice, setOnlyNotice] = useState(false);
+  const onlyAck = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (!onlyNotice) return;
+    onlyAck.current?.focus();
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setOnlyNotice(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onlyNotice]);
   return (
+    <>
     <div className="task-strip" role="tablist" aria-label={d.tasks.label}>
       {book.tabs.map((tab) => {
         const active = tab.id === book.active;
@@ -737,6 +749,10 @@ function TaskStrip<F>({
               title={d.tasks.close}
               onClick={(event) => {
                 event.stopPropagation();
+                if (book.tabs.length === 1) {
+                  setOnlyNotice(true);
+                  return;
+                }
                 onClose(tab.id);
               }}
             >
@@ -756,6 +772,23 @@ function TaskStrip<F>({
         +
       </button>
     </div>
+    {onlyNotice && (
+      <div className="task-only" role="presentation" onClick={() => setOnlyNotice(false)}>
+        <div
+          className="task-only-card"
+          role="dialog"
+          aria-modal="true"
+          aria-label={d.tasks.only}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <p>{d.tasks.only}</p>
+          <button ref={onlyAck} type="button" className="task-only-btn" onClick={() => setOnlyNotice(false)}>
+            {d.tasks.onlyAck}
+          </button>
+        </div>
+      </div>
+    )}
+    </>
   );
 }
 

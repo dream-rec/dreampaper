@@ -1,5 +1,10 @@
-import { describe, expect, it } from 'vitest';
+// @vitest-environment jsdom
+import { act, createElement } from 'react';
+import { createRoot, type Root } from 'react-dom/client';
+import { afterEach, describe, expect, it } from 'vitest';
 import type { JobRecord } from '../types';
+import { desktopCopy } from './copy';
+import { TaskStrip } from './shell';
 import {
   activeTab,
   addTab,
@@ -51,19 +56,19 @@ describe('task book', () => {
     const b = book.active;
     book = addTab(book, { title: 'c' });
     const c = book.active;
-    book = closeTab(book, c, { title: '' });
+    book = closeTab(book, c);
     expect(book.active).toBe(b);
     book = selectTab(book, a);
-    book = closeTab(book, b, { title: '' });
+    book = closeTab(book, b);
     expect(book.active).toBe(a);
     expect(book.tabs).toHaveLength(1);
-    // The last tab is reset rather than removed.
+    // The last tab cannot be removed, and its number does not advance.
     book = patchTab(book, a, () => ({ job: job('j') }));
-    book = closeTab(book, a, { title: '' });
-    expect(book.tabs).toHaveLength(1);
-    expect(activeTab(book).job).toBeNull();
-    expect(activeTab(book).form.title).toBe('');
-    expect(activeTab(book).seq).toBe(4);
+    const stuck = closeTab(book, a);
+    expect(stuck).toBe(book);
+    expect(activeTab(stuck).job?.id).toBe('j');
+    expect(activeTab(stuck).form.title).toBe('a');
+    expect(activeTab(stuck).seq).toBe(1);
   });
 
   it('reports only unsettled jobs as live and labels tabs by title', () => {
@@ -78,5 +83,50 @@ describe('task book', () => {
     expect(tabLabel(book.tabs[1], (form) => form.title, fallback)).toBe('第二个很长很长很长很长的标题…');
     book = patchTab(book, a, () => ({ job: job('j1', 'succeeded', 'Job title') }));
     expect(tabLabel(book.tabs[0], (form) => form.title, fallback)).toBe('Job title');
+  });
+});
+
+describe('只剩一个任务页时', () => {
+  let root: Root | null = null;
+
+  afterEach(() => {
+    act(() => root?.unmount());
+    root = null;
+    document.body.innerHTML = '';
+  });
+
+  function render(book: ReturnType<typeof openBook<{ title: string }>>, onClose: (id: string) => void) {
+    const host = document.createElement('div');
+    document.body.append(host);
+    root = createRoot(host);
+    act(() => {
+      root!.render(
+        createElement(TaskStrip<{ title: string }>, {
+          book,
+          d: desktopCopy.zh,
+          formTitle: (form) => form.title,
+          onSelect: () => {},
+          onAdd: () => {},
+          onClose
+        })
+      );
+    });
+    return host;
+  }
+
+  it('点删除会提示无法删除，任务页保持不动', () => {
+    const book = openBook({ title: '' });
+    let closed = false;
+    const host = render(book, () => {
+      closed = true;
+    });
+    const close = host.querySelector<HTMLButtonElement>('.task-tab-close');
+    act(() => close?.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    expect(closed).toBe(false);
+    expect(document.body.textContent).toContain('唯一任务，无法删除');
+    const ack = document.body.querySelector<HTMLButtonElement>('.task-only-btn');
+    act(() => ack?.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    expect(document.body.querySelector('.task-only')).toBeNull();
+    expect(host.querySelector('.task-tab-label')?.textContent).toBe('任务 1');
   });
 });

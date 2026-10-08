@@ -49,16 +49,12 @@ export function selectTab<F>(book: TaskBook<F>, id: string): TaskBook<F> {
 }
 
 /**
- * Removes a tab. The last tab is reset instead of removed so the page never
- * has nothing to show; focus moves to the neighbour on the left.
+ * Removes a tab. The last tab stays: the page always has one task, and its
+ * number does not advance. Focus moves to the neighbour on the left.
  */
-export function closeTab<F>(book: TaskBook<F>, id: string, blankForm: F): TaskBook<F> {
+export function closeTab<F>(book: TaskBook<F>, id: string): TaskBook<F> {
   const index = book.tabs.findIndex((tab) => tab.id === id);
-  if (index === -1) return book;
-  if (book.tabs.length === 1) {
-    const fresh: TaskTab<F> = { id: nextId(), seq: book.nextSeq, form: blankForm, job: null };
-    return { tabs: [fresh], active: fresh.id, nextSeq: book.nextSeq + 1 };
-  }
+  if (index === -1 || book.tabs.length === 1) return book;
   const tabs = book.tabs.filter((tab) => tab.id !== id);
   const active =
     book.active === id ? tabs[Math.max(0, index - 1)].id : book.active;

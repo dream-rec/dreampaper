@@ -2010,6 +2010,48 @@
   opacity: 1;
 }
 
+.task-only {
+  position: fixed;
+  z-index: 200;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(22, 24, 32, 0.46);
+}
+
+.task-only-card {
+  width: min(360px, 100%);
+  display: grid;
+  gap: 16px;
+  padding: 22px 22px 18px;
+  border-radius: 18px;
+  background: var(--card);
+  color: var(--ink);
+  box-shadow: var(--shadow-float);
+}
+
+.task-only-card p {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 650;
+  line-height: 1.5;
+}
+
+.task-only-btn {
+  justify-self: end;
+  min-height: 36px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 680;
+  cursor: pointer;
+}
+
 .task-tab-add {
   display: inline-grid;
   width: 30px;
