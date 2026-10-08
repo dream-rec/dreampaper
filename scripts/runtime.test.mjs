@@ -197,7 +197,7 @@ test('运行依赖只允许系统库目录或包内，含 $ORIGIN 归属复核',
 });
 
 /** 临时目录里的假 gh：只把收到的调用记到 calls.txt，不碰任何远端。 */
-function fakeGh(directory) {
+function fakeGh(directory, releases = '[]') {
   const bin = join(directory, 'bin');
   mkdirSync(bin, { recursive: true });
   const script = join(bin, 'gh.js');
@@ -207,7 +207,7 @@ function fakeGh(directory) {
     "const marker = join(__dirname, '..', 'calls.txt');",
     "appendFileSync(marker, process.argv.slice(2).join(' ') + '\\n');",
     "const url = process.argv[3] ?? '';",
-    "if (url.includes('/releases')) process.stdout.write('[]');",
+    `if (url.includes('/releases')) process.stdout.write(${JSON.stringify(releases)});`,
     "else if (url.includes('/git/ref/tags/')) process.stdout.write(JSON.stringify({ object: { type: 'commit', sha: process.env.GITHUB_SHA } }));",
     "else writeFileSync(join(__dirname, '..', 'notes.txt'), '');"
   ].join('\n'));
@@ -247,6 +247,38 @@ test('缺少第五个产物时草稿步骤必须阻断，且一次远端调用�
     const create = calls.split('\n').find((line) => line.startsWith('release create v0.2.1'));
     assert.ok(create, calls);
     for (const name of [...assets, 'dreampaper-0.2.1-amd64.deb']) assert.ok(create.includes(`release-artifacts/${name}`), `${name}: ${create}`);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('已有草稿时只替换安装包，不改标题和更新说明', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'draft 已有 '));
+  try {
+    const releases = JSON.stringify([{ tag_name: 'v0.2.1', draft: true, name: 'v0.2.1' }]);
+    const gh = fakeGh(directory, releases);
+    mkdirSync(join(directory, 'release-artifacts'));
+    writeFileSync(join(directory, 'package.json'), JSON.stringify({ name: 'dreampaper', version: '0.2.1' }));
+    writeFileSync(join(directory, 'CHANGELOG.md'), '# 变更记录\n\n## v0.2.1\n\n测试条目\n');
+    for (const name of ['setup.exe', 'portable.zip', 'x64-mac.dmg', 'arm64-mac.dmg', 'amd64.deb']) {
+      writeFileSync(join(directory, 'release-artifacts', `dreampaper-0.2.1-${name}`), 'asset');
+    }
+    const passed = spawnSync(process.execPath, [join(root, 'scripts/draft.mjs')], {
+      cwd: directory,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        DREAMPAPER_GH: gh.script,
+        GITHUB_REF_NAME: 'v0.2.1', GITHUB_REPOSITORY: 'owner/repo', GITHUB_SHA: '0'.repeat(40)
+      }
+    });
+    assert.equal(passed.status, 0, passed.stderr);
+    const calls = readFileSync(gh.marker, 'utf8');
+    assert.match(calls, /^release upload v0\.2\.1 --repo owner\/repo --clobber /m);
+    assert.doesNotMatch(calls, /release edit/);
+    assert.doesNotMatch(calls, /release create/);
+    assert.doesNotMatch(calls, /--title/);
+    assert.doesNotMatch(calls, /notes-file/);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

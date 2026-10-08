@@ -33,30 +33,6 @@
 
 ---
 
-## What's new
-
-**v0.2.0**
-- Workbench: fix garbled text, mixed fonts and off-color fills right on the generated image — box-select a region to sample the background color and get an editable text layer, crop by whole pixels, export lossless PNG at source resolution
-- Offline OCR: a pure-Rust sidecar process with ONNX Runtime runs PP-OCRv6 locally; models are downloaded on first use and verified per-file, and nothing ever leaves the machine
-- Stage hooks: context injection is now an explicit, pluggable hook chain; the progress log names what each stage was injected with
-- Case memory: design products are stored and recalled through CJK-bigram FTS5, up to 3 same-mode matches per task
-- Advisor role: compares the recalled cases and injects reusable layouts, term mappings and failure modes to avoid
-- Task rating: tag a finished task good / fair / poor; the rating lives in the case record and informs the advisor
-- Multi-task tabs: up to 8 isolated task pages each on the figure and slide screens
-- Result card: the workbench and download buttons are equal height and flush with the card edges
-
-**v0.1.3**
-- Reworked history manager: browse every past job, rerun any of them in one click
-- Transparent generation log: the design model's analysis for each step streams alongside the job progress
-- Automatic update checks and light/dark theme switching
-- Assorted bug fixes and smoothness work
-
-| History | Design log |
-| --- | --- |
-| ![history](examples/desktop/history.jpg) | ![log](examples/desktop/log.jpg) |
-
----
-
 ## Gallery
 
 ### Web UI
@@ -64,6 +40,10 @@
 | Figure | Slide | Settings |
 | --- | --- | --- |
 | ![figure ui](examples/ui/figure.jpg) | ![slide ui](examples/ui/slide.jpg) | ![settings ui](examples/ui/settings.jpg) |
+
+| History | Design log |
+| --- | --- |
+| ![history](examples/desktop/history.jpg) | ![log](examples/desktop/log.jpg) |
 
 ### Paper figures
 

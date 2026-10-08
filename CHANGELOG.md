@@ -46,6 +46,8 @@ Linux Debian 发布、全局简单模式，以及适配 grok2api v3 的 Grok 搜
 - **设置页不再附带字段说明**。协议介绍、代理与并发的补充说明、超时建议等提示文案全部去掉，只留字段本身。
 - **模板列表改为缩略图**。选择网格不再把生成分辨率的原图解码进 WebKit；送给模型的仍是磁盘上的原图。
 - **Search 行箭头对齐**。`duckduckgo` 没有右侧徽章时，箭头仍固定在最后一列，与其他设置行的箭头对齐。
+- **macOS 已打开的页面不再叠在一起**。页面叠在同一格里，隐藏只靠 `content-visibility`。macOS 的 WKWebView 不理会它，科研图上会透出其他页的字和按钮。没打开的页面改为 `visibility: hidden`。Intel 与 Apple Silicon 是同一套界面。
+- **安装版 Linux 不再继承软件绘制开关**。`WEBKIT_DISABLE_COMPOSITING_MODE` 和 `WEBKIT_DISABLE_DMABUF_RENDERER` 常写在 `/etc/environment` 里，从菜单启动的 `.deb` 会带上，WebKit 因此用 CPU 画界面，点击和切页发闷。进程启动 WebKit 前清掉这两项，只影响 DreamPaper。
 
 ## v0.2.0
 

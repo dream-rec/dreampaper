@@ -5,10 +5,18 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    // WebKitGTK 2.50 asks AT-SPI synchronously on every focus change. Moving
-    // between the title and the method field, or Tab, waits on that bus, which
-    // is the lag. This app does not expose an assistive-technology tree.
+    // Linux WebKitGTK only. Must run before GTK/WebKit starts.
     #[cfg(target_os = "linux")]
-    std::env::set_var("GTK_A11Y", "none");
+    {
+        // AT-SPI is queried synchronously on every focus change, so moving
+        // between text fields waits on that bus. This app has no AT tree.
+        std::env::set_var("GTK_A11Y", "none");
+        // These two are a common NVIDIA workaround in /etc/environment. They
+        // force software compositing for every WebKit process, which is why an
+        // installed .deb feels sticky next to Windows and macOS. The installed
+        // app inherits the session environment; unset them for this process.
+        std::env::remove_var("WEBKIT_DISABLE_COMPOSITING_MODE");
+        std::env::remove_var("WEBKIT_DISABLE_DMABUF_RENDERER");
+    }
     dreampaper_lib::run();
 }

@@ -30,10 +30,11 @@ const changelog = readFileSync('CHANGELOG.md', 'utf8');
 const section = changelog.split(`## ${tag}`)[1]?.split(/\n## /)[0]?.trim();
 if (!section) throw new Error('缺少当前版本 CHANGELOG');
 const notes = `## DreamPaper ${tag}\n\n${section}\n\n## 安装文件\n\n| 文件 | 平台 |\n| --- | --- |\n| dreampaper-${version}-setup.exe | Windows x64 安装版 |\n| dreampaper-${version}-portable.zip | Windows x64 便携版，完整解压后运行 |\n| dreampaper-${version}-x64-mac.dmg | macOS Intel |\n| dreampaper-${version}-arm64-mac.dmg | macOS Apple Silicon |\n| dreampaper-${version}-amd64.deb | Ubuntu 22.04 及以上 x86-64（Debian 系，需 libwebkit2gtk-4.1） |\n\n五类产物均通过最终包内的模型下载、中英文推理、重启后离线识别门禁。OCR 引擎内置，模型首次使用时下载；无需 Python。便携版要求系统已安装 WebView2 Runtime。\n\nLinux 只发布 x86-64 的 .deb，在 Ubuntu 22.04 上构建，可在 22.04 及更新的发行版上安装（需 libwebkit2gtk-4.1）；不提供 RPM 或 AppImage。\n\nmacOS 使用 ad-hoc 签名，未做 Developer ID 公证；Windows 未做商业代码签名。Gatekeeper / SmartScreen 可能提示，请仅从本仓库下载。构建部署目标为 macOS 13.0，但现代 CI runner 不代表最低系统实机测试已经完成。\n\n本项目采用 PolyForm Noncommercial License 1.0.0，仅允许非商业使用。\n`;
-writeFileSync('release-notes.md', notes);
+const assets = files.map((name) => `release-artifacts/${name}`);
 if (!existing) {
-  gh(['release', 'create', tag, '--repo', repository, '--draft', '--verify-tag', '--title', `DreamPaper ${tag}`, '--notes-file', 'release-notes.md', ...files.map((name) => `release-artifacts/${name}`)], true);
+  writeFileSync('release-notes.md', notes);
+  gh(['release', 'create', tag, '--repo', repository, '--draft', '--verify-tag', '--title', `DreamPaper ${tag}`, '--notes-file', 'release-notes.md', ...assets], true);
 } else {
-  gh(['release', 'upload', tag, '--repo', repository, '--clobber', ...files.map((name) => `release-artifacts/${name}`)], true);
-  gh(['release', 'edit', tag, '--repo', repository, '--draft', '--title', `DreamPaper ${tag}`, '--notes-file', 'release-notes.md'], true);
+  // 草稿已在发布页改过标题和说明。重跑只替换安装包，不调用 release edit。
+  gh(['release', 'upload', tag, '--repo', repository, '--clobber', ...assets], true);
 }

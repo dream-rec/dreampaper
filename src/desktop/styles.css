@@ -423,9 +423,9 @@
   overflow: hidden;
 }
 
-/* Inactive pages stay mounted but are not painted. An opacity crossfade kept
-   every visited page on the compositor and WebKit redrew them on the main
-   thread for the whole 180ms, which is the hitch when changing pages. */
+/* Inactive pages stay mounted. `content-visibility` alone does not hide
+   paint on macOS WKWebView, so every visited page stacked in this grid cell
+   and showed through. `visibility` is what actually keeps the others off. */
 .desktop-pane {
   display: grid;
   position: relative;
@@ -435,11 +435,13 @@
   min-width: 0;
   min-height: 0;
   overflow-y: auto;
+  visibility: hidden;
   content-visibility: hidden;
   pointer-events: none;
 }
 
 .desktop-pane.is-active {
+  visibility: visible;
   content-visibility: visible;
   pointer-events: auto;
   z-index: 1;
